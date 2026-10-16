@@ -162,15 +162,49 @@ async function doLogin() {
     await enterApp();
     if (r.mustChangePin) changePin(typed);
   } catch (err) {
-    $('#loginMsg').textContent = err.message === 'Failed to fetch'
-      ? 'Cannot reach the server. Check your internet or the API URL.'
+    // Chrome says "Failed to fetch", Safari "Load failed", Firefox "NetworkError…"
+    const network = err instanceof TypeError || /fetch|load failed|network/i.test(err.message);
+    $('#loginMsg').textContent = network
+      ? 'Cannot reach the server (' + err.message + '). Tap "Run connection check" below.'
       : err.message;
+    $('#netCheckBtn').classList.toggle('hidden', !network);
     pin = ''; drawDots();
   } finally {
     btn.disabled = false; btn.textContent = 'Sign in';
   }
 }
 $('#loginBtn').addEventListener('click', doLogin);
+
+// Step-by-step test of the path to the Apps Script server, so a failing phone can
+// show which hop breaks. Sends no PIN or token — only the public "ping".
+async function connectionCheck() {
+  const out = $('#netCheck');
+  out.classList.remove('hidden');
+  const lines = [];
+  const show = () => { out.textContent = lines.join('\n'); };
+  const step = async (label, fn) => {
+    lines.push('… ' + label); show();
+    const t0 = Date.now();
+    try { const r = await fn(); lines[lines.length - 1] = '✔ ' + label + ' — ' + r + ' (' + (Date.now() - t0) + ' ms)'; }
+    catch (e) { lines[lines.length - 1] = '✘ ' + label + ' — ' + (e.name || 'Error') + ': ' + e.message + ' (' + (Date.now() - t0) + ' ms)'; }
+    show();
+  };
+  lines.push('App v' + CFG.VERSION + ' · online: ' + navigator.onLine + ' · ' + (matchMedia('(display-mode: standalone)').matches ? 'installed app' : 'browser tab'));
+  lines.push(navigator.userAgent);
+  lines.push('Server: …' + String(CFG.API_URL).slice(-16));
+  await step('Read server (GET)', async () => {
+    const r = await fetch(CFG.API_URL, { method: 'GET', redirect: 'follow', cache: 'no-store' });
+    const t = await r.text(); return r.status + ' ' + t.slice(0, 40);
+  });
+  await step('Send to server (POST ping)', async () => {
+    const r = await fetch(CFG.API_URL, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ action: 'ping' }), redirect: 'follow', cache: 'no-store' });
+    const t = await r.text(); return r.status + ' ' + t.slice(0, 40);
+  });
+  lines.push('', 'Take a screenshot of this box and send it to support.');
+  show();
+}
+$('#netCheckBtn').addEventListener('click', connectionCheck);
 $('#loginUser').addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
 document.addEventListener('keydown', e => {
   if ($('#login').classList.contains('hidden')) return;
