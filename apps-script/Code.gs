@@ -192,7 +192,9 @@ function ensureTab_(ss, name, cols) {
 }
 
 function props_() { return PropertiesService.getScriptProperties(); }
-function ss_() { return SpreadsheetApp.openById(SHEET_ID); }
+// Opening the spreadsheet is slow, so do it once per request (globals reset every run).
+var SS_ = null;
+function ss_() { return SS_ || (SS_ = SpreadsheetApp.openById(SHEET_ID)); }
 
 // ============================================================ ROUTING
 function doGet(e) {
@@ -214,7 +216,7 @@ function doPost(e) {
     if (!user) return json_({ ok: false, error: 'AUTH', message: 'Session expired. Please log in again.' });
 
     switch (action) {
-      case 'bootstrap':    return json_(bootstrap_(user));
+      case 'bootstrap':    return json_(bootstrap_(user, req.since));
       case 'saveLead':     lock.waitLock(20000); return json_(saveLead_(user, req.lead));
       case 'deleteLead':   lock.waitLock(20000); return json_(deleteLead_(user, req.id));
       case 'addFollowup':  lock.waitLock(20000); return json_(addFollowup_(user, req.followup));
@@ -352,13 +354,25 @@ function isOwner_(user, leadBy) {
 }
 
 // ============================================================ READ
-function bootstrap_(user) {
-  var leads = readTab_(TABS.LEADS, LEAD_COLS)
-    .filter(function (l) { return l.id && String(l.deleted).toUpperCase() !== 'TRUE'; })
-    .map(normalizeLead_);
+// since (ISO time from the previous reply's serverTime): send only leads and follow-ups
+// changed after it, plus deleted lead ids, so the minute-by-minute sync stays small.
+// Without it, everything is sent. Hand edits in the Sheet don't touch updatedAt, so
+// the phone does a full load whenever the app is opened.
+function bootstrap_(user, since) {
+  var cutoff = since ? new Date(since).getTime() - 2 * 60000 : NaN;   // 2 min overlap for clock skew
+  var delta = !isNaN(cutoff);
+  var changed = function (v) { var t = v instanceof Date ? v.getTime() : new Date(v).getTime(); return isNaN(t) || t >= cutoff; };
+
+  var leads = [], removed = [];
+  readTab_(TABS.LEADS, LEAD_COLS).forEach(function (l) {
+    if (!l.id) return;
+    if (delta && !changed(l.updatedAt)) return;
+    if (String(l.deleted).toUpperCase() === 'TRUE') { if (delta) removed.push(String(l.id)); return; }
+    leads.push(normalizeLead_(l));
+  });
 
   var followups = readTab_(TABS.FOLLOWUPS, FOLLOWUP_COLS)
-    .filter(function (f) { return f.id; })
+    .filter(function (f) { return f.id && (!delta || changed(f.at)); })
     .map(function (f) { f.at = toIso_(f.at); f.nextDate = toDateStr_(f.nextDate); return f; });
 
   var users = readTab_(TABS.USERS, USER_COLS)
@@ -377,7 +391,7 @@ function bootstrap_(user) {
       o.createdAt = toIso_(d.createdAt); o.updatedAt = toIso_(d.updatedAt); delete o.deleted; return o;
     });
 
-  return { ok: true, user: user, leads: leads, followups: followups, users: users, dealers: dealers, settings: readSettings_(), serverTime: new Date().toISOString() };
+  return { ok: true, delta: delta, user: user, leads: leads, removed: removed, followups: followups, users: users, dealers: dealers, settings: readSettings_(), serverTime: new Date().toISOString() };
 }
 
 function normalizeLead_(l) {
@@ -535,6 +549,11 @@ function addFollowup_(user, f) {
   var lead = rows[idx];
   if (user.role !== 'Admin' && !isOwner_(user, lead.leadBy)) {
     return { ok: false, message: 'You can only log follow-ups on your own leads.' };
+  }
+
+  // A phone that lost the reply resends the same follow-up; don't record it twice.
+  if (f.id && readTab_(TABS.FOLLOWUPS, FOLLOWUP_COLS).some(function (x) { return String(x.id) === String(f.id); })) {
+    return { ok: true, duplicate: true };
   }
 
   var rec = {

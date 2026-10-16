@@ -28,6 +28,8 @@ const Store = {
   queue: [],
   syncing: false,
   lastSync: null,
+  lastError: null,   // why the last sync failed, shown on Home until one succeeds
+  cursor: null,      // serverTime of the last reply; the next sync asks for changes since then
   listeners: [],
 
   /* ---------------- persistence ---------------- */
@@ -46,6 +48,7 @@ const Store = {
         this.dealers = c.dealers || [];
         this.settings = c.settings || this.settings;
         this.lastSync = c.lastSync || null;
+        this.cursor = c.cursor || null;
       }
     } catch (e) {}
     try { this.queue = JSON.parse(localStorage.getItem(LS.QUEUE) || '[]'); } catch (e) { this.queue = []; }
@@ -55,7 +58,7 @@ const Store = {
     try {
       localStorage.setItem(LS.CACHE, JSON.stringify({
         leads: this.leads, followups: this.followups,
-        users: this.users, dealers: this.dealers, settings: this.settings, lastSync: this.lastSync
+        users: this.users, dealers: this.dealers, settings: this.settings, lastSync: this.lastSync, cursor: this.cursor
       }));
       localStorage.setItem(LS.QUEUE, JSON.stringify(this.queue));
     } catch (e) { console.warn('cache write failed', e); }
@@ -72,6 +75,7 @@ const Store = {
   clearSession() {
     this.token = null; this.user = null;
     this.leads = []; this.followups = []; this.users = []; this.dealers = []; this.queue = [];
+    this.cursor = null; this.lastError = null;
     try { [LS.TOKEN, LS.USER, LS.CACHE, LS.QUEUE].forEach(k => localStorage.removeItem(k)); } catch (e) {}
   },
 
@@ -80,21 +84,47 @@ const Store = {
     return !!(CFG.API_URL && CFG.API_URL.indexOf('PASTE_YOUR') === -1);
   },
 
-  async api(action, payload = {}) {
+  // Every call has a time limit: on a phone a request can stall (signal drop, network
+  // switch) and without a limit it would block syncing until the app is restarted.
+  async api(action, payload = {}, { timeout = 60000 } = {}) {
     if (!this.configured()) throw new Error('API_URL is not set in js/config.js');
 
-    const res = await fetch(CFG.API_URL, {
-      method: 'POST',
-      // text/plain keeps this a "simple request" so the browser skips
-      // the CORS preflight that Apps Script cannot answer.
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify(Object.assign({ action, token: this.token }, payload)),
-      redirect: 'follow'
-    });
-    if (!res.ok) throw new Error('Server responded ' + res.status);
-    const data = await res.json();
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), timeout);
+    let res, data;
+    try {
+      res = await fetch(CFG.API_URL, {
+        method: 'POST',
+        // text/plain keeps this a "simple request" so the browser skips
+        // the CORS preflight that Apps Script cannot answer.
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify(Object.assign({ action, token: this.token }, payload)),
+        redirect: 'follow',
+        cache: 'no-store',
+        signal: ctl.signal
+      });
+      if (!res.ok) throw new Error('Server responded ' + res.status);
+      const text = await res.text();
+      try { data = JSON.parse(text); }
+      catch (e) { throw new Error('Server sent an unexpected reply — Google may be busy, try again'); }
+    } catch (err) {
+      if (err.name === 'AbortError') throw new Error('The server took too long to answer');
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
     if (data && data.error === 'AUTH') { this.clearSession(); throw new Error('SESSION_EXPIRED'); }
     return data;
+  },
+
+  // Reads are safe to repeat, so give a flaky connection one more go.
+  async apiRetry(action, payload) {
+    try { return await this.api(action, payload); }
+    catch (err) {
+      if (String(err.message) === 'SESSION_EXPIRED') throw err;
+      await new Promise(r => setTimeout(r, 1500));
+      return this.api(action, payload);
+    }
   },
 
   /* ---------------- auth ---------------- */
@@ -106,16 +136,31 @@ const Store = {
   },
 
   /* ---------------- sync ---------------- */
-  async pull() {
-    const r = await this.api('bootstrap');
+  // full: reload everything (app open, sign-in, Sync now). Otherwise ask only for
+  // what changed since the last reply and merge it in.
+  async pull({ full = false } = {}) {
+    const since = !full && this.cursor && this.leads.length ? this.cursor : undefined;
+    const r = await this.apiRetry('bootstrap', since ? { since } : {});
     if (!r.ok) throw new Error(r.message || 'Could not load data');
-    this.leads = r.leads || [];
-    this.followups = r.followups || [];
+    if (r.delta) {
+      const gone = new Set(r.removed || []);
+      const byId = new Map(this.leads.filter(l => !gone.has(l.id)).map(l => [l.id, l]));
+      (r.leads || []).forEach(l => byId.set(l.id, l));
+      this.leads = Array.from(byId.values());
+      const seen = new Set(this.followups.map(f => f.id));
+      this.followups = this.followups.filter(f => !gone.has(f.leadId))
+        .concat((r.followups || []).filter(f => !seen.has(f.id)));
+    } else {
+      this.leads = r.leads || [];
+      this.followups = r.followups || [];
+    }
     this.users = r.users || [];
     this.dealers = r.dealers || [];
     this.settings = r.settings || this.settings;
     if (r.user) this.setSession(this.token, r.user);
+    this.cursor = r.serverTime || null;
     this.lastSync = new Date().toISOString();
+    this.lastError = null;
     this.persist();
     this.emit();
     return r;
@@ -127,7 +172,7 @@ const Store = {
     this.emit();
   },
 
-  async sync({ silent = false } = {}) {
+  async sync({ silent = false, full = false } = {}) {
     if (this.syncing || !this.token) return { ok: false, skipped: true };
     if (!navigator.onLine) return { ok: false, offline: true };
     this.syncing = true; this.emit();
@@ -141,14 +186,17 @@ const Store = {
           this.queue.shift(); pushed++;
           this.persist();
         } catch (err) {
-          if (String(err.message) === 'SESSION_EXPIRED') throw err;
-          break; // still offline / transient — keep the job for later
+          // offline / transient: keep the job and skip the pull too, or the reply
+          // would hide this phone's unsent change until the next try
+          throw err;
         }
       }
-      await this.pull();
+      await this.pull({ full });
       return { ok: true, pushed, failed };
     } catch (err) {
-      return { ok: false, error: err.message };
+      const msg = err.message === 'Failed to fetch' || err.message === 'Load failed' ? 'No connection to the server' : err.message;
+      if (msg !== 'SESSION_EXPIRED') this.lastError = msg;
+      return { ok: false, error: msg };
     } finally {
       this.syncing = false; this.emit();
     }

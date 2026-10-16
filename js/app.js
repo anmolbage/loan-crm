@@ -307,6 +307,7 @@ function renderHome() {
   let b = '';
   if (!navigator.onLine) b += `<div class="banner offline">${ICON.cloud}Offline — changes are saved on this phone and will sync automatically.</div>`;
   if (Store.queue.length) b += `<div class="banner sync">${ICON.cloud}${Store.queue.length} change${Store.queue.length === 1 ? '' : 's'} waiting to sync.</div>`;
+  b += syncBanner();
   $('#homeBanner').innerHTML = b;
 }
 
@@ -362,7 +363,9 @@ function renderLeads() {
   $('#leadCount').textContent = list.length + ' lead' + (list.length === 1 ? '' : 's') + ' · ' + inr(sum(list));
   $('#leadList').innerHTML = list.length
     ? list.map(leadCard).join('')
-    : `<div class="empty">${ICON.inbox}<b>No leads here</b><p>Try clearing a filter, or tap + to add one.</p></div>`;
+    : !Store.leads.length && (Store.syncing || Store.lastError)
+      ? syncBanner() || `<div class="empty">${ICON.inbox}<b>Loading your leads…</b><p>This can take a few seconds.</p></div>`
+      : `<div class="empty">${ICON.inbox}<b>No leads here</b><p>Try clearing a filter, or tap + to add one.</p></div>`;
 }
 
 function filteredLeads() {
@@ -1339,10 +1342,19 @@ $('#exportBtn').addEventListener('click', exportCSV);
 /* ============================================================
    SYNC
    ============================================================ */
+// Shown on Home (and in an empty Leads list) so a slow or failed sync is never
+// mistaken for "no leads".
+function syncBanner() {
+  if (Store.syncing && !Store.leads.length) return `<div class="banner sync">${ICON.cloud}Loading your leads… this can take a few seconds.</div>`;
+  if (!Store.lastError) return '';
+  const when = Store.lastSync ? 'showing data saved ' + prettyTime(Store.lastSync) : 'nothing saved on this phone yet';
+  return `<div class="banner offline">${ICON.cloud}Couldn't sync: ${esc(Store.lastError)} — ${when}. Tap ↻ to try again.</div>`;
+}
+
 async function doSync() {
   const btn = $('#syncBtn');
   btn.style.opacity = '.5';
-  const r = await Store.sync();
+  const r = await Store.sync({ full: true });
   btn.style.opacity = '';
   if (r.offline) toast('You are offline — will sync later');
   else if (r.ok) {
@@ -1378,7 +1390,7 @@ async function enterApp() {
   $('#login').classList.add('hidden');
   $('#app').classList.remove('hidden');
   go('home');
-  const r = await Store.sync();
+  const r = await Store.sync({ full: true });   // full load on open picks up hand edits in the Sheet
   if (r.error === 'SESSION_EXPIRED') { showLogin(); toast('Session expired, sign in again', 'err'); return; }
   render();
 }
