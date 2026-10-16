@@ -11,7 +11,7 @@ window.LOAN_CONFIG = {
   API_URL: 'PASTE_YOUR_APPS_SCRIPT_URL_HERE',
 
   APP_NAME: 'Loan CRM',
-  VERSION: '1.0.0',
+  VERSION: '1.1.0',
 
   // Your branch — pre-filled on every new lead and printed on the shared proposal
   BRANCH_NAME: 'Ramgarh Cantt',
@@ -19,10 +19,6 @@ window.LOAN_CONFIG = {
 
   // Google Sheet used as the database (for the "Open Sheet" link in More)
   SHEET_URL: 'https://docs.google.com/spreadsheets/d/1Q5o8u2aVCYHx-rIdjCxK7upGORchQ2mBDW_6gZD5im8/edit',
-
-  /* Add ?demo=1 to the URL to try the app on sample data with no backend.
-     Sign in with admin / 1234. Nothing touches your Sheet. */
-  DEMO_MODE: /[?&]demo=1/.test(location.search),
 
   // Colour per product group. Groups added later by an Admin get a colour from the fallback list.
   GROUP_COLORS: {

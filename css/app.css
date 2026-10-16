@@ -448,7 +448,6 @@ a{color:inherit;text-decoration:none}
 }
 .banner.offline{background:#fdf1d6;color:#8a5a05}
 .banner.sync{background:#e6f0fc;color:#1d4ed8}
-.banner.demo{background:#efe7fb;color:#6d28d9}
 .banner svg{width:16px;height:16px;flex:none}
 
 .spinner{

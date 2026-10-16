@@ -32,19 +32,11 @@ The app only needs to know one thing: the web address of your Apps Script. That 
 5. Click the **Save** icon (💾).
 6. At the top there is a dropdown that probably says `doGet`. Change it to **`setup`**, then click **▶ Run**.
 7. Google will ask for permission. Click **Review permissions → your account → Advanced → Go to Untitled project (unsafe) → Allow**. This is normal: you are allowing *your own* script to edit *your own* Sheet.
-8. Go back to the Sheet tab. You should now see six tabs at the bottom: **Leads, Users, Followups, Settings, Dealers, ActivityLog**. The Users tab already has your admin login in it.
+8. At the bottom of the editor, the **Execution log** shows a line like
+   `Admin login created. Username: admin   Temporary PIN: 483920`. Note that PIN.
+9. Go back to the Sheet tab. You should now see six tabs at the bottom: **Leads, Users, Followups, Settings, Dealers, ActivityLog**. The same temporary PIN is in the **Users** tab, in the `pin` column.
 
-### Step 2 — Add the sample leads (optional, recommended)
-
-So you can see the app working with real-looking data:
-
-1. Still in the Apps Script editor, click the **+** next to *Files* (left side) → **Script**. Name it `Seed`.
-2. Open `apps-script/Seed.gs` from this folder, copy everything, paste it in, **Save**.
-3. Change the function dropdown to **`seedSampleLeads`** → **▶ Run**.
-
-Six sample leads appear in the Leads tab, one in nearly every stage, plus four sample dealers in the Dealers tab. When you no longer want them, run **`removeSampleLeads`** the same way — it only removes those samples.
-
-### Step 3 — Publish the script as a web address
+### Step 2 — Publish the script as a web address
 
 1. In the Apps Script editor, click **Deploy → New deployment** (top right).
 2. Click the gear icon ⚙ next to "Select type" → **Web app**.
@@ -56,7 +48,7 @@ Six sample leads appear in the Leads tab, one in nearly every stage, plus four s
 
 > "Anyone" only means the address is reachable. The script refuses every request that does not carry a valid username and PIN, so your data stays private.
 
-### Step 4 — Tell the app where the script is
+### Step 3 — Tell the app where the script is
 
 1. Open `js/config.js` in a text editor.
 2. Find the line near the top that says:
@@ -67,7 +59,7 @@ Six sample leads appear in the Leads tab, one in nearly every stage, plus four s
 
 That is the only file you need to edit.
 
-### Step 5 — Put the app on GitHub
+### Step 4 — Put the app on GitHub
 
 1. Go to github.com, sign in, click **New repository**. Name it `loan-crm`, keep it **Public**, click **Create repository**.
 2. On the next page click **uploading an existing file**. Drag the *contents* of this folder in (index.html, manifest.json, sw.js, the css, js, icons and apps-script folders). Click **Commit changes**.
@@ -89,8 +81,10 @@ That is the only file you need to edit.
    ```
 
 > A public repository is safe here: it contains no customer data and no PINs. All of that is in your Sheet, which stays private. The only thing in the repository is the script's web address, which is useless without a login.
+>
+> Already done for you: the app lives at **https://github.com/anmolbage/loan-crm** and is published at **https://anmolbage.github.io/loan-crm/**. After Step 3, just commit and push `js/config.js`.
 
-### Step 6 — Install on your phone
+### Step 5 — Install on your phone
 
 Open the link on your phone:
 
@@ -101,21 +95,18 @@ It then opens full-screen with its own icon, like any installed app.
 
 ---
 
-## Login
+## Login and PINs
 
-Created by `setup`. **Change the PIN on day one** (More → Change my PIN).
+Your first login is `admin` with the **temporary PIN** from Step 1. The moment you sign in, the app asks you to choose your own 4–6 digit PIN. After that:
 
-| Username | PIN | Role |
-|---|---|---|
-| `admin` | 1234 | Admin (you) |
+- Your PIN is stored only in scrambled (hashed) form in the Users tab — nobody, including you, can read it back from the Sheet.
+- Changing your PIN (More → Change my PIN) signs out every other phone using your login.
+- After **5 wrong PINs** a login is locked for 15 minutes.
+- **Forgot your PIN?** Open the Sheet → Users tab and type a new PIN (just digits) into your `pin` cell. It works once, and the app makes you pick a new one.
 
-This CRM is built to be run by you alone. If you ever want a second login (say, for another phone), add it under **More → Logins & PINs**.
+**Adding staff** (More → Logins & PINs): give them a name, a username and a temporary PIN. They choose their own PIN the first time they sign in. Switching a login off, deleting it, or changing its role takes effect on their phone straight away. Usernames can't be renamed — add a new login instead.
 
----
-
-## Try it before setting anything up
-
-Add `?demo=1` to the app's address — `https://YOUR-USERNAME.github.io/loan-crm/?demo=1` — and it runs on sample data kept only on that phone. Sign in as `admin` / `1234`. Nothing touches your Sheet.
+Staff see every lead but can only edit, move, follow up or delete their **own**. An Admin can edit anything and, when there is more than one login, gets a **Lead for** box on the lead form to put a lead in someone else's name. The server enforces all of this, not just the screens.
 
 ---
 
@@ -186,18 +177,17 @@ Loan-CRM-App/
 ├── sw.js                 service worker — offline caching
 ├── css/app.css           all styling, light and dark themes
 ├── js/config.js          ← the only file you edit
-├── js/store.js           state, Sheets API, offline queue, demo data
+├── js/store.js           state, Sheets API, offline queue
 ├── js/app.js             screens and interactions
 ├── icons/                app icons
 └── apps-script/
-    ├── Code.gs           the backend, pasted into your Sheet
-    └── Seed.gs           six sample leads (optional)
+    └── Code.gs           the backend, pasted into your Sheet
 ```
 
 ## Sheet tabs
 
 - **Leads** — one row per lead, one column per field (profile fields included), so you can filter and pivot it like any spreadsheet. `deleted` is set to TRUE instead of removing rows, so nothing is ever truly lost.
-- **Users** — username, name, PIN, role, active.
+- **Users** — username, name, PIN (hashed; plain digits = a temporary PIN), role, active.
 - **Followups** — the full follow-up history, one row per note.
 - **Settings** — product groups, products and stages as JSON. Edit through the app, not by hand.
 - **Dealers** — the DSE / dealer directory, one row per contact.
@@ -209,9 +199,11 @@ You can edit the Leads tab directly and the app picks it up on next sync. Just d
 
 ## Troubleshooting
 
-**"Cannot reach the server"** — the `API_URL` in `js/config.js` is wrong, or the deployment's access isn't "Anyone". Re-check Steps 3 and 4.
+**"Cannot reach the server"** — the `API_URL` in `js/config.js` is wrong, or the deployment's access isn't "Anyone". Re-check Steps 2 and 3.
 
-**Changes not showing on another phone** — tap the ↻ icon on Home. The app also syncs automatically every minute and whenever it comes back online.
+**Changes not showing on another phone** — tap the ↻ icon on Home. While the app is open it also syncs every minute, whenever you switch back to it, and whenever it comes back online.
+
+**"Too many wrong PINs"** — wait 15 minutes, or reset the PIN in the Users tab (see *Login and PINs*).
 
 **I edited Code.gs but nothing changed** — Apps Script needs a redeploy: **Deploy → Manage deployments → ✎ → Version: New version → Deploy**. The URL stays the same.
 
@@ -221,4 +213,4 @@ You can edit the Leads tab directly and the app picks it up on next sync. Just d
 
 ## A note on security
 
-The PIN is stored in plain text in the Sheet and the script's address is public. This is sensible for a single-user tool and keeps the whole thing free and simple — but it is not bank-grade. Don't put anything in here you wouldn't put in a private spreadsheet, and change the default PIN.
+PINs are hashed, wrong guesses are rate-limited, and every request is checked against the Users tab, so a disabled login stops working at once. It is still a simple tool rather than bank-grade software: the Sheet itself is the real vault, so keep it shared with no one, and only give logins to people you trust with the whole pipeline.

@@ -109,17 +109,20 @@ function toast(msg, kind) {
 }
 
 /* ---------------------------------------------- bottom sheet */
-function openSheet(html) {
+let sheetLocked = false;
+function openSheet(html, locked) {
+  sheetLocked = !!locked;
   $('#sheetBody').innerHTML = html;
   $('#sheet').scrollTop = 0;
   $('#sheetBg').classList.add('on');
   $('#sheet').classList.add('on');
 }
 function closeSheet() {
+  sheetLocked = false;
   $('#sheetBg').classList.remove('on');
   $('#sheet').classList.remove('on');
 }
-$('#sheetBg').addEventListener('click', closeSheet);
+$('#sheetBg').addEventListener('click', () => { if (!sheetLocked) closeSheet(); });
 
 /* ============================================================
    LOGIN
@@ -153,9 +156,11 @@ async function doLogin() {
   if (!Store.configured()) { $('#loginMsg').textContent = 'API_URL is not set in js/config.js yet.'; return; }
   btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>';
   try {
-    await Store.login(u, pin);
+    const typed = pin;
+    const r = await Store.login(u, pin);
     pin = ''; drawDots();
     await enterApp();
+    if (r.mustChangePin) changePin(typed);
   } catch (err) {
     $('#loginMsg').textContent = err.message === 'Failed to fetch'
       ? 'Cannot reach the server. Check your internet or the API URL.'
@@ -265,7 +270,6 @@ function renderHome() {
 
   // banners
   let b = '';
-  if (CFG.DEMO_MODE) b += `<div class="banner demo">${ICON.box}Demo mode — sample data on this phone only. Nothing reaches your Sheet.</div>`;
   if (!navigator.onLine) b += `<div class="banner offline">${ICON.cloud}Offline — changes are saved on this phone and will sync automatically.</div>`;
   if (Store.queue.length) b += `<div class="banner sync">${ICON.cloud}${Store.queue.length} change${Store.queue.length === 1 ? '' : 's'} waiting to sync.</div>`;
   $('#homeBanner').innerHTML = b;
@@ -387,7 +391,7 @@ function openDetail(id) {
   const mob = String(l.mobile || '').replace(/\D/g, '');
   const msg = CFG.WA_TEMPLATE.replace('{name}', l.name).replace('{product}', Store.productName(l.product))
     .replace('{bank}', CFG.BANK_NAME).replace('{branch}', l.branch || CFG.BRANCH_NAME);
-  const editable = true;
+  const editable = Store.canEdit(l);
   const hist = Store.followupsFor(l.id);
   const stages = Store.settings.stages || [];
   const idx = stages.findIndex(s => s.name === l.stage);
@@ -423,10 +427,10 @@ function openDetail(id) {
       <button class="act share" data-act="share" data-id="${esc(l.id)}">${ICON.share}<span>Share proposal</span></button>
     </div>
 
-    <div class="btn-row">
-      <button class="btn" data-act="followup" data-id="${esc(l.id)}" ${editable ? '' : 'disabled'}>${ICON.cal} Follow-up / move</button>
-      <button class="btn ghost" data-act="edit" data-id="${esc(l.id)}" ${editable ? '' : 'disabled'}>${ICON.edit} Edit</button>
-    </div>
+    ${editable ? `<div class="btn-row">
+      <button class="btn" data-act="followup" data-id="${esc(l.id)}">${ICON.cal} Follow-up / move</button>
+      <button class="btn ghost" data-act="edit" data-id="${esc(l.id)}">${ICON.edit} Edit</button>
+    </div>` : `<p class="sub" style="margin:4px 0 12px">This lead belongs to ${esc(Store.ownerName(l))}. Only they or an Admin can change it.</p>`}
 
     <div class="stages">${strip}</div>
     <div class="stage-line">
@@ -464,6 +468,7 @@ function openDetail(id) {
       ${l.dealerId && Store.dealerOf(l)
         ? `<button class="kv" style="width:100%;text-align:left" data-dealer="${esc(l.dealerId)}"><span class="k">Source</span><span class="v" style="color:var(--brand-2)">${esc(l.source)} · ${esc(l.sourceName)} ›</span></button>`
         : kv('Source', l.source + (l.sourceName ? ' · ' + l.sourceName : ''))}
+      ${kv('Lead by', Store.ownerName(l) || '—')}
       ${kv('Branch', l.branch || CFG.BRANCH_NAME)}
       ${kv('Created', l.createdAt ? prettyDate(l.createdAt) : '—')}
       ${kv('Last updated', l.updatedAt ? prettyTime(l.updatedAt) : '—')}
@@ -484,7 +489,7 @@ function openDetail(id) {
         </div>`).join('')}</div>
     </div>` : ''}
 
-    <button class="btn ghost" data-act="delete" data-id="${esc(l.id)}" style="margin-top:16px;color:var(--danger)">${ICON.trash} Delete lead</button>
+    ${editable ? `<button class="btn ghost" data-act="delete" data-id="${esc(l.id)}" style="margin-top:16px;color:var(--danger)">${ICON.trash} Delete lead</button>` : ''}
   `);
 }
 
@@ -557,7 +562,7 @@ function proposalText(l) {
   }
   lines.push('Loan required: ' + money(l.amount));
   lines.push('');
-  lines.push('Submitted by ' + ((Store.user || {}).name || l.leadBy) + ', Branch Manager, ' + (l.branch || CFG.BRANCH_NAME));
+  lines.push('Submitted by ' + ((Store.user || {}).name || Store.ownerName(l)) + ', Branch Manager, ' + (l.branch || CFG.BRANCH_NAME));
   if (l.source === 'DSE/Dealer' && l.sourceName) lines.push('Lead via ' + l.sourceName);
   return lines.join('\n');
 }
@@ -610,7 +615,7 @@ function blankLead() {
     incomeSource: '', income: '', incomePeriod: 'Monthly', dependents: '', earners: '', familyNote: '',
     residence: '', locality: '', resYears: '', requirement: '', bizNature: '', bizPlace: '', bizYears: '',
     obligations: '', security: '', projectCost: '', margin: '', projectDesc: '',
-    leadBy: (Store.user || {}).name
+    leadBy: (Store.user || {}).username
   };
 }
 
@@ -667,6 +672,7 @@ function drawForm() {
     </div>
 
     <div class="field"><label>Branch</label><input id="fBranch" value="${esc(l.branch || CFG.BRANCH_NAME)}"></div>
+    ${leadForField(l)}
 
     <div class="form-sec">Project</div>
     <div class="row2">
@@ -745,6 +751,16 @@ function drawForm() {
   $('#fCost').oninput = recalc; $('#fMargin').oninput = recalc;
 }
 
+// Admin-only: create or move a lead into any active login's name.
+function leadForField(l) {
+  if ((Store.user || {}).role !== 'Admin') return '';
+  const people = Store.users.filter(u => u.active !== false);
+  if (people.length < 2) return '';
+  const cur = (Store.users.find(u => u.username === l.leadBy || u.name === l.leadBy) || {}).username || l.leadBy;
+  return `<div class="field"><label>Lead for</label><select id="fLeadBy">${people.map(u =>
+    `<option value="${esc(u.username)}"${u.username === cur ? ' selected' : ''}>${esc(u.name)} (@${esc(u.username)})</option>`).join('')}</select></div>`;
+}
+
 function collectForm() {
   const g = id => { const e = $(id); return e ? e.value : ''; };
   const l = formLead;
@@ -765,6 +781,7 @@ function collectForm() {
   l.stage = g('#fStage');
   l.nextFollowupDate = g('#fNext');
   l.branch = g('#fBranch').trim() || CFG.BRANCH_NAME;
+  if ($('#fLeadBy')) l.leadBy = g('#fLeadBy');
   l.projectCost = g('#fCost'); l.margin = g('#fMargin'); l.amount = g('#fAmount');
   l.projectDesc = g('#fProjDesc').trim();
   l.security = g('#fSecurity').trim();
@@ -1015,7 +1032,7 @@ function renderMore() {
   $('#moreName').textContent = u.name || '—';
   $('#moreRole').textContent = (u.role || 'Staff') + ' · @' + (u.username || '');
   $('#verLabel').textContent = CFG.APP_NAME + ' v' + CFG.VERSION +
-    (Store.lastSync ? ' · synced ' + prettyTime(Store.lastSync) : '') + (CFG.DEMO_MODE ? ' · DEMO' : '');
+    (Store.lastSync ? ' · synced ' + prettyTime(Store.lastSync) : '');
 
   const isAdmin = u.role === 'Admin';
   const dark = document.documentElement.dataset.theme === 'dark';
@@ -1028,7 +1045,7 @@ function renderMore() {
     isAdmin ? { k: 'staff', i: ICON.users, t: 'Logins & PINs', s: Store.users.length + ' login' + (Store.users.length === 1 ? '' : 's') } : null,
     { k: 'pin', i: ICON.key, t: 'Change my PIN', s: 'Keep your account secure' },
     { k: 'theme', i: ICON.moon, t: 'Dark mode', s: dark ? 'On' : 'Follows your phone', toggle: dark },
-    { k: 'sheet', i: ICON.sheet, t: 'Open Google Sheet', s: 'The database behind this app' }
+    isAdmin ? { k: 'sheet', i: ICON.sheet, t: 'Open Google Sheet', s: 'The database behind this app' } : null
   ].filter(Boolean);
 
   $('#moreMenu').innerHTML = items.map(it => `
@@ -1152,13 +1169,13 @@ function editStages() {
       dateKey: r.dataset.datekey || ''
     })).filter(x => x.name);
     if (!out.length) { toast('Keep at least one stage', 'err'); return; }
-    // renamed stages: carry leads along
+    // renamed stages: save the new list first, then carry leads along (their days-in-stage are kept)
     const oldNames = s.stages.map(x => x.name);
+    s.stages = out;
+    Store.saveSettings(s);
     out.forEach((st, i) => { if (oldNames[i] && oldNames[i] !== st.name && !oldNames.includes(st.name)) {
       Store.leads.filter(l => l.stage === oldNames[i]).forEach(l => { l.stage = st.name; Store.enqueue('saveLead', { lead: l }); });
     } });
-    s.stages = out;
-    Store.saveSettings(s);
     closeSheet(); toast('Stages saved', 'ok'); render();
   };
 }
@@ -1166,46 +1183,62 @@ function editStages() {
 /* ---------------- staff editor ---------------- */
 function editStaff() {
   const users = JSON.parse(JSON.stringify(Store.users));
+  const baseline = users.map(u => u.username);
   openSheet(`
     <h3>Logins & PINs</h3>
-    <p class="sub">Usernames that can open this app. Keep at least one Admin.</p>
-    <div id="staffList">${users.map(staffRow).join('')}</div>
+    <p class="sub">Usernames that can open this app. Keep at least one Admin. A PIN you set here is temporary — the person must choose their own the first time they sign in.</p>
+    <div id="staffList">${users.map(u => staffRow(u, false)).join('')}</div>
     <button class="btn ghost sm" id="addStaff" style="margin-top:6px">+ Add login</button>
     <button class="btn" id="saveStaff" style="margin-top:14px">Save logins</button>
   `);
   $('#addStaff').onclick = () => $('#staffList').insertAdjacentHTML('beforeend',
-    staffRow({ username: '', name: '', pin: '1234', role: 'Admin', active: true }));
+    staffRow({ username: '', name: '', role: 'Staff', active: true }, true));
   $('#staffList').addEventListener('click', ev => {
-    const d = ev.target.closest('.del'); if (d) d.closest('.card').remove();
+    const d = ev.target.closest('.del');
+    if (d) {
+      const un = d.closest('.card').querySelector('[data-u]').value.trim().toLowerCase();
+      if (un && un === (Store.user || {}).username) { toast('You cannot remove your own login', 'err'); return; }
+      d.closest('.card').remove();
+    }
     const sw = ev.target.closest('.switch'); if (sw) sw.classList.toggle('on');
   });
   $('#saveStaff').onclick = () => {
-    const out = $$('#staffList .card').map(c => ({
-      username: c.querySelector('[data-u]').value.trim().toLowerCase(),
-      name: c.querySelector('[data-n]').value.trim(),
-      pin: c.querySelector('[data-p]').value.trim() || '1234',
-      role: c.querySelector('[data-r]').value,
-      mobile: '',
-      active: c.querySelector('.switch').classList.contains('on')
-    })).filter(u => u.username && u.name);
+    const out = [];
+    for (const c of $$('#staffList .card')) {
+      const u = {
+        username: c.querySelector('[data-u]').value.trim().toLowerCase(),
+        name: c.querySelector('[data-n]').value.trim(),
+        pin: c.querySelector('[data-p]').value.trim(),
+        role: c.querySelector('[data-r]').value,
+        active: c.querySelector('.switch').classList.contains('on'),
+        isNew: c.dataset.new === '1'
+      };
+      if (!u.username && !u.name) continue;
+      if (!u.username || !u.name) { toast('Every login needs a name and a username', 'err'); return; }
+      if (!/^[a-z0-9._-]+$/.test(u.username)) { toast('Username "' + u.username + '": letters and numbers only', 'err'); return; }
+      if (u.isNew && !u.pin) { toast('Set a temporary PIN for ' + u.name, 'err'); return; }
+      if (u.pin && !/^\d{4,6}$/.test(u.pin)) { toast('PIN for ' + u.name + ' must be 4-6 digits', 'err'); return; }
+      if (out.some(x => x.username === u.username)) { toast('Username "' + u.username + '" is used twice', 'err'); return; }
+      out.push(u);
+    }
     if (!out.some(u => u.role === 'Admin' && u.active)) { toast('Keep at least one active Admin', 'err'); return; }
-    Store.saveUsers(out);
-    closeSheet(); toast('Staff saved', 'ok'); render();
+    Store.saveUsers(out, baseline);
+    closeSheet(); toast('Logins saved', 'ok'); render();
   };
 }
-function staffRow(u) {
-  return `<div class="card" style="margin-bottom:10px">
+function staffRow(u, isNew) {
+  return `<div class="card" style="margin-bottom:10px" data-new="${isNew ? 1 : 0}">
     <div class="row2">
       <div class="field" style="margin-bottom:8px"><label>Name</label><input data-n value="${esc(u.name)}"></div>
-      <div class="field" style="margin-bottom:8px"><label>Username</label><input data-u value="${esc(u.username)}" autocapitalize="none"></div>
+      <div class="field" style="margin-bottom:8px"><label>Username</label><input data-u value="${esc(u.username)}" autocapitalize="none" ${isNew ? '' : 'readonly'}></div>
     </div>
     <div class="row2">
-      <div class="field" style="margin-bottom:8px"><label>PIN</label><input data-p inputmode="numeric" value="${esc(u.pin || '1234')}"></div>
+      <div class="field" style="margin-bottom:8px"><label>${isNew ? 'Temporary PIN' : 'Reset PIN'}</label><input data-p inputmode="numeric" maxlength="6" placeholder="${isNew ? '4-6 digits' : 'Leave blank to keep'}"></div>
       <div class="field" style="margin-bottom:8px"><label>Role</label>
-        <select data-r><option${u.role === 'Staff' ? ' selected' : ''}>Staff</option><option${u.role === 'Admin' ? ' selected' : ''}>Admin</option></select></div>
+        <select data-r><option${u.role !== 'Admin' ? ' selected' : ''}>Staff</option><option${u.role === 'Admin' ? ' selected' : ''}>Admin</option></select></div>
     </div>
     <div style="display:flex;align-items:center;gap:10px">
-      <span style="font-size:13px;color:var(--text-2);flex:1">Active</span>
+      <span style="font-size:13px;color:var(--text-2);flex:1">Active${u.mustChangePin ? ' · <em>has a temporary PIN</em>' : ''}</span>
       <span class="switch${u.active !== false ? ' on' : ''}"></span>
       <button class="del" style="width:36px;height:36px;border-radius:11px;background:var(--surface-2);color:var(--danger);display:grid;place-items:center">${ICON.trash}</button>
     </div>
@@ -1213,24 +1246,33 @@ function staffRow(u) {
 }
 
 /* ---------------- change PIN ---------------- */
-function changePin() {
+// forcedOld: set when signing in with a temporary PIN — the sheet cannot be dismissed.
+function changePin(forcedOld) {
+  const forced = typeof forcedOld === 'string';
   openSheet(`
-    <h3>Change PIN</h3>
-    <p class="sub">Use 4 to 6 digits.</p>
-    <div class="field"><label>Current PIN</label><input id="pOld" inputmode="numeric" type="password"></div>
-    <div class="field"><label>New PIN</label><input id="pNew" inputmode="numeric" type="password"></div>
-    <div class="field"><label>Confirm new PIN</label><input id="pNew2" inputmode="numeric" type="password"></div>
+    <h3>${forced ? 'Choose your own PIN' : 'Change PIN'}</h3>
+    <p class="sub">${forced ? 'You signed in with a temporary PIN. Pick a new 4 to 6 digit PIN to continue.' : 'Use 4 to 6 digits.'}</p>
+    ${forced ? '' : '<div class="field"><label>Current PIN</label><input id="pOld" inputmode="numeric" type="password"></div>'}
+    <div class="field"><label>New PIN</label><input id="pNew" inputmode="numeric" type="password" maxlength="6"></div>
+    <div class="field"><label>Confirm new PIN</label><input id="pNew2" inputmode="numeric" type="password" maxlength="6"></div>
     <button class="btn" id="pSave">Update PIN</button>
-  `);
+  `, forced);
   $('#pSave').onclick = async () => {
-    const o = $('#pOld').value.trim(), n = $('#pNew').value.trim(), n2 = $('#pNew2').value.trim();
+    const o = forced ? forcedOld : $('#pOld').value.trim(), n = $('#pNew').value.trim(), n2 = $('#pNew2').value.trim();
     if (!/^\d{4,6}$/.test(n)) { toast('PIN must be 4-6 digits', 'err'); return; }
     if (n !== n2) { toast('New PINs do not match', 'err'); return; }
+    if (n === o) { toast('Pick a PIN different from the old one', 'err'); return; }
     try {
       const r = await Store.api('changePin', { oldPin: o, newPin: n });
-      if (r.ok) { closeSheet(); toast('PIN updated', 'ok'); }
+      if (r.ok) {
+        if (r.token) Store.setSession(r.token, Store.user);
+        closeSheet(); toast('PIN updated', 'ok');
+      }
       else toast(r.message || 'Could not update PIN', 'err');
-    } catch (err) { toast('Needs internet connection', 'err'); }
+    } catch (err) {
+      if (String(err.message) === 'SESSION_EXPIRED') { closeSheet(); showLogin(); toast('Session expired, sign in again', 'err'); }
+      else toast('Needs internet connection', 'err');
+    }
   };
 }
 
@@ -1300,11 +1342,8 @@ async function enterApp() {
   $('#login').classList.add('hidden');
   $('#app').classList.remove('hidden');
   go('home');
-  try {
-    await Store.sync();
-  } catch (err) {
-    if (String(err.message) === 'SESSION_EXPIRED') { showLogin(); return; }
-  }
+  const r = await Store.sync();
+  if (r.error === 'SESSION_EXPIRED') { showLogin(); toast('Session expired, sign in again', 'err'); return; }
   render();
 }
 
@@ -1319,7 +1358,6 @@ $('#logoutBtn').addEventListener('click', () => {
     const th = localStorage.getItem(LS.THEME);
     if (th) document.documentElement.dataset.theme = th;
   } catch (e) {}
-  if (CFG.DEMO_MODE) $('#loginTag').textContent = 'Demo — sign in with admin / 1234';
 
   Store.load();
   renderPinpad();
@@ -1330,7 +1368,14 @@ $('#logoutBtn').addEventListener('click', () => {
   if ('serviceWorker' in navigator) {
     window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));
   }
-  setInterval(() => { if (Store.token && Store.queue.length && navigator.onLine) Store.sync(); }, 60000);
+  // Push pending changes and pull everyone else's every minute while the app is open.
+  const bgSync = async () => {
+    if (!Store.token || !navigator.onLine || document.hidden) return;
+    const r = await Store.sync({ silent: true });
+    if (r.error === 'SESSION_EXPIRED') { showLogin(); toast('Session expired, sign in again', 'err'); }
+  };
+  setInterval(bgSync, 60000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) bgSync(); });
 })();
 
 })();

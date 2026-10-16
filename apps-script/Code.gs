@@ -6,15 +6,23 @@
  * 1. Open your Google Sheet -> Extensions -> Apps Script
  * 2. Delete everything, paste this file, Save.
  * 3. Run the function `setup` once and approve permissions.
+ *    It creates the tabs and an `admin` login with a random temporary
+ *    PIN, written in the Users tab. You choose your own PIN at first sign-in.
  * 4. Deploy -> New deployment -> type "Web app"
  *      Execute as: Me
  *      Who has access: Anyone
  *    Copy the /exec URL into js/config.js of the web app.
+ *
+ * PINs: a PIN typed into the Users tab by hand (plain digits) is treated as
+ * temporary — it works once and the person must then pick their own, which
+ * is stored only as a salted hash.
  */
 
 // ============================================================ CONFIG
 var SHEET_ID = '1Q5o8u2aVCYHx-rIdjCxK7upGORchQ2mBDW_6gZD5im8';
 var TOKEN_TTL_DAYS = 30;
+var MAX_PIN_TRIES = 5;          // wrong PINs in a row before a login is locked
+var LOCK_MINUTES = 15;          // ...for this long
 
 var TABS = {
   LEADS: 'Leads',
@@ -81,9 +89,11 @@ function defaultSettings_() {
   };
 }
 
+// The first Admin gets a random temporary PIN (plain digits = temporary).
 function defaultUsers_() {
+  var pin = String(100000 + Math.floor(Math.random() * 900000));
   return [
-    ['admin', 'Anmol', '1234', 'Admin', '', 'TRUE']
+    ['admin', 'Anmol', "'" + pin, 'Admin', '', 'TRUE']
   ];
 }
 
@@ -97,7 +107,9 @@ function setup() {
 
   var users = ensureTab_(ss, TABS.USERS, USER_COLS);
   if (users.getLastRow() < 2) {
-    users.getRange(2, 1, defaultUsers_().length, USER_COLS.length).setValues(defaultUsers_());
+    var first = defaultUsers_();
+    users.getRange(2, 1, first.length, USER_COLS.length).setValues(first);
+    Logger.log('Admin login created. Username: admin   Temporary PIN: ' + String(first[0][2]).replace("'", ''));
   }
 
   var settings = ensureTab_(ss, TABS.SETTINGS, SETTING_COLS);
@@ -116,7 +128,18 @@ function setup() {
   if (!props_().getProperty('SECRET')) {
     props_().setProperty('SECRET', Utilities.getUuid() + Utilities.getUuid());
   }
+  props_().setProperty('SETUP_DONE', '2');
+  Logger.log('Setup complete. Your starting PIN is in the Users tab. Now deploy as a Web app.');
   return 'Setup complete. Now deploy as a Web app.';
+}
+
+// Runs setup automatically the first time the web app is called, in case it was skipped.
+function ensureSetup_() {
+  if (props_().getProperty('SETUP_DONE') === '2') return;
+  var lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try { if (props_().getProperty('SETUP_DONE') !== '2') setup(); }
+  finally { lock.releaseLock(); }
 }
 
 function ensureTab_(ss, name, cols) {
@@ -145,6 +168,7 @@ function doPost(e) {
   try {
     var req = JSON.parse(e.postData.contents || '{}');
     var action = req.action;
+    ensureSetup_();
 
     if (action === 'ping') return json_({ ok: true, time: new Date().toISOString() });
     if (action === 'login') return json_(login_(req));
@@ -160,7 +184,7 @@ function doPost(e) {
       case 'saveDealer':   lock.waitLock(20000); return json_(saveDealer_(user, req.dealer));
       case 'deleteDealer': lock.waitLock(20000); return json_(deleteDealer_(user, req.id));
       case 'saveSettings': lock.waitLock(20000); return json_(saveSettings_(user, req.settings));
-      case 'saveUsers':    lock.waitLock(20000); return json_(saveUsers_(user, req.users));
+      case 'saveUsers':    lock.waitLock(20000); return json_(saveUsers_(user, req.users, req.baseline));
       case 'changePin':    lock.waitLock(20000); return json_(changePin_(user, req.oldPin, req.newPin));
       default: return json_({ ok: false, error: 'UNKNOWN_ACTION', message: 'Unknown action: ' + action });
     }
@@ -177,59 +201,117 @@ function json_(obj) {
 }
 
 // ============================================================ AUTH
+// Stored PIN formats in the Users tab:
+//   h1$<salt>$<hash>  — the person's own PIN (salted, keyed hash)
+//   plain digits      — temporary PIN set by setup or an Admin; must be changed at sign-in
+function hashPin_(pin, salt) {
+  var secret = props_().getProperty('SECRET') || 'change-me';
+  var raw = Utilities.computeHmacSha256Signature(salt + ':' + String(pin), secret);
+  return raw.map(function (b) { return ('0' + (b & 0xff).toString(16)).slice(-2); }).join('');
+}
+function makePinHash_(pin) {
+  var salt = Utilities.getUuid().replace(/-/g, '').slice(0, 16);
+  return 'h1$' + salt + '$' + hashPin_(pin, salt);
+}
+function isTempPin_(stored) { return String(stored || '').indexOf('h1$') !== 0; }
+function pinMatches_(stored, pin) {
+  stored = String(stored == null ? '' : stored).trim();
+  pin = String(pin == null ? '' : pin).trim();
+  if (!stored || !pin) return false;
+  if (isTempPin_(stored)) return stored === pin;
+  var parts = stored.split('$');
+  return parts.length === 3 && hashPin_(pin, parts[1]) === parts[2];
+}
+// Changes whenever the stored PIN changes, so a PIN change signs out every other phone.
+function pinVersion_(stored) {
+  var raw = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, String(stored || ''));
+  return Utilities.base64EncodeWebSafe(raw).slice(0, 10);
+}
+
+function findUser_(username) {
+  username = String(username || '').trim().toLowerCase();
+  var rows = readTab_(TABS.USERS, USER_COLS);
+  for (var i = 0; i < rows.length; i++) {
+    if (String(rows[i].username).trim().toLowerCase() === username) return { row: i + 2, u: rows[i] };
+  }
+  return null;
+}
+function publicUser_(u) {
+  return { username: String(u.username).trim().toLowerCase(), name: String(u.name || ''), role: u.role === 'Admin' ? 'Admin' : 'Staff' };
+}
+
 function login_(req) {
   var username = String(req.username || '').trim().toLowerCase();
   var pin = String(req.pin || '').trim();
   if (!username || !pin) return { ok: false, error: 'BAD_INPUT', message: 'Enter username and PIN.' };
 
-  var rows = readTab_(TABS.USERS, USER_COLS);
-  for (var i = 0; i < rows.length; i++) {
-    var u = rows[i];
-    if (String(u.username).trim().toLowerCase() === username) {
-      if (String(u.active).toUpperCase() === 'FALSE') return { ok: false, error: 'DISABLED', message: 'This account is disabled.' };
-      if (String(u.pin).trim() !== pin) return { ok: false, error: 'BAD_PIN', message: 'Incorrect PIN.' };
-      var safe = { username: String(u.username).trim(), name: u.name, role: u.role || 'Staff' };
-      log_(safe.name, 'login', 'user', safe.username, '');
-      return { ok: true, token: makeToken_(safe), user: safe };
-    }
+  var cache = CacheService.getScriptCache();
+  var key = 'fails_' + username;
+  var fails = Number(cache.get(key) || 0);
+  if (fails >= MAX_PIN_TRIES) {
+    return { ok: false, error: 'LOCKED', message: 'Too many wrong PINs. Try again in ' + LOCK_MINUTES + ' minutes.' };
   }
-  return { ok: false, error: 'NO_USER', message: 'User not found.' };
+
+  var found = findUser_(username);
+  if (!found) return { ok: false, error: 'BAD_LOGIN', message: 'Wrong username or PIN.' };
+  var u = found.u;
+  if (String(u.active).toUpperCase() === 'FALSE') return { ok: false, error: 'DISABLED', message: 'This account is disabled.' };
+  if (!pinMatches_(u.pin, pin)) {
+    cache.put(key, String(fails + 1), LOCK_MINUTES * 60);
+    log_(username, 'login-failed', 'user', username, '');
+    var left = MAX_PIN_TRIES - fails - 1;
+    return { ok: false, error: 'BAD_LOGIN', message: left > 0 ? 'Wrong username or PIN. ' + left + ' tries left.' : 'Too many wrong PINs. Try again in ' + LOCK_MINUTES + ' minutes.' };
+  }
+  cache.remove(key);
+  var safe = publicUser_(u);
+  log_(safe.name, 'login', 'user', safe.username, '');
+  return { ok: true, token: makeToken_(safe.username, u.pin), user: safe, mustChangePin: isTempPin_(u.pin) };
 }
 
-function makeToken_(user) {
+function makeToken_(username, storedPin) {
   var exp = Date.now() + TOKEN_TTL_DAYS * 86400000;
-  var payload = Utilities.base64EncodeWebSafe(JSON.stringify({ u: user, e: exp }));
+  var payload = Utilities.base64EncodeWebSafe(JSON.stringify({ n: username, v: pinVersion_(storedPin), e: exp }));
   return payload + '.' + sign_(payload);
 }
 function sign_(text) {
   var secret = props_().getProperty('SECRET') || 'change-me';
   return Utilities.base64EncodeWebSafe(Utilities.computeHmacSha256Signature(text, secret));
 }
+// Checks the signature and expiry, then re-reads the Users tab so that a disabled
+// login, a role change or a PIN change takes effect on the very next request.
 function verifyToken_(token) {
   if (!token) return null;
   var parts = String(token).split('.');
   if (parts.length !== 2) return null;
   if (sign_(parts[0]) !== parts[1]) return null;
-  try {
-    var data = JSON.parse(Utilities.newBlob(Utilities.base64DecodeWebSafe(parts[0])).getDataAsString());
-    if (!data.e || data.e < Date.now()) return null;
-    return data.u;
-  } catch (err) { return null; }
+  var data;
+  try { data = JSON.parse(Utilities.newBlob(Utilities.base64DecodeWebSafe(parts[0])).getDataAsString()); }
+  catch (err) { return null; }
+  if (!data || !data.n || !data.e || data.e < Date.now()) return null;
+  var found = findUser_(data.n);
+  if (!found || String(found.u.active).toUpperCase() === 'FALSE') return null;
+  if (pinVersion_(found.u.pin) !== data.v) return null;
+  return publicUser_(found.u);
 }
 
 function changePin_(user, oldPin, newPin) {
   newPin = String(newPin || '').trim();
   if (!/^\d{4,6}$/.test(newPin)) return { ok: false, message: 'PIN must be 4 to 6 digits.' };
-  var sh = ss_().getSheetByName(TABS.USERS);
-  var rows = readTab_(TABS.USERS, USER_COLS);
-  for (var i = 0; i < rows.length; i++) {
-    if (String(rows[i].username).trim().toLowerCase() === String(user.username).toLowerCase()) {
-      if (String(rows[i].pin).trim() !== String(oldPin).trim()) return { ok: false, message: 'Current PIN is incorrect.' };
-      sh.getRange(i + 2, USER_COLS.indexOf('pin') + 1).setValue("'" + newPin);
-      return { ok: true, message: 'PIN updated.' };
-    }
-  }
-  return { ok: false, message: 'User not found.' };
+  var found = findUser_(user.username);
+  if (!found) return { ok: false, message: 'User not found.' };
+  if (!pinMatches_(found.u.pin, oldPin)) return { ok: false, message: 'Current PIN is incorrect.' };
+  if (String(oldPin).trim() === newPin) return { ok: false, message: 'Pick a PIN different from the old one.' };
+  var stored = makePinHash_(newPin);
+  ss_().getSheetByName(TABS.USERS).getRange(found.row, USER_COLS.indexOf('pin') + 1).setValue(stored);
+  log_(user.name, 'change-pin', 'user', user.username, '');
+  // a fresh token for this phone; every other session for this login is now invalid
+  return { ok: true, message: 'PIN updated.', token: makeToken_(user.username, stored) };
+}
+
+// Ownership: leadBy holds the owner's username. Older rows may hold the display name.
+function isOwner_(user, leadBy) {
+  var o = String(leadBy || '');
+  return !o || o === user.username || o === user.name;
 }
 
 // ============================================================ READ
@@ -245,8 +327,8 @@ function bootstrap_(user) {
   var users = readTab_(TABS.USERS, USER_COLS)
     .filter(function (u) { return u.username; })
     .map(function (u) {
-      var o = { username: String(u.username).trim(), name: u.name, role: u.role || 'Staff', mobile: String(u.mobile || ''), active: String(u.active).toUpperCase() !== 'FALSE' };
-      if (user.role === 'Admin') o.pin = String(u.pin);
+      var o = { username: String(u.username).trim().toLowerCase(), name: u.name, role: u.role === 'Admin' ? 'Admin' : 'Staff', mobile: String(u.mobile || ''), active: String(u.active).toUpperCase() !== 'FALSE' };
+      if (user.role === 'Admin') o.mustChangePin = isTempPin_(u.pin);
       return o;
     });
 
@@ -314,7 +396,8 @@ function todayStr_() { return Utilities.formatDate(new Date(), Session.getScript
 
 // ============================================================ WRITE
 function saveLead_(user, lead) {
-  return { ok: true, lead: writeLead_(user, lead) };
+  var r = writeLead_(user, lead);
+  return r && r.ok === false ? r : { ok: true, lead: r };
 }
 
 function writeLead_(user, lead) {
@@ -332,10 +415,13 @@ function writeLead_(user, lead) {
   // only an Admin may create a lead on someone else's behalf, or move one.
   var isAdmin = user.role === 'Admin';
   var storedOwner = prev ? String(prev.leadBy || '') : '';
-  if (prev && !isAdmin && storedOwner && storedOwner !== user.name) {
-    throw new Error('Only ' + storedOwner + ' or an Admin can change this lead.');
+  if (prev && !isAdmin && !isOwner_(user, storedOwner)) {
+    return { ok: false, message: 'Only ' + storedOwner + ' or an Admin can change this lead.' };
   }
-  var owner = isAdmin ? (lead.leadBy || storedOwner || user.name) : (storedOwner || user.name);
+  var owner;
+  if (isAdmin && lead.leadBy && findUser_(lead.leadBy)) owner = String(lead.leadBy).trim().toLowerCase();
+  else if (storedOwner && !(storedOwner === user.name && !isAdmin)) owner = storedOwner;
+  else owner = user.username;
 
   var rec = {};
   LEAD_COLS.forEach(function (c) { rec[c] = lead[c] == null ? '' : lead[c]; });
@@ -354,11 +440,12 @@ function writeLead_(user, lead) {
   // Loan required = project cost - margin, whenever both are given
   if (rec.projectCost > 0) rec.amount = Math.max(0, rec.projectCost - rec.margin);
 
-  // Stage bookkeeping (server-side, so Sheet edits by hand stay consistent)
+  // Stage bookkeeping. The phone stamps stageSince when the stage changes (so an
+  // offline edit keeps the day it really happened, and a stage rename keeps the
+  // lead's age); fill it here only when the phone did not send one.
   var prevStage = prev ? String(prev.stage || '') : '';
-  if (!prev || prevStage !== rec.stage || !rec.stageSince) {
-    if (!prev || prevStage !== rec.stage) rec.stageSince = todayStr_();
-    else rec.stageSince = toDateStr_(prev.stageSince) || todayStr_();
+  if (!rec.stageSince) {
+    rec.stageSince = (prev && prevStage === rec.stage && toDateStr_(prev.stageSince)) || todayStr_();
   }
   stampStageDate_(rec);
 
@@ -387,7 +474,7 @@ function deleteLead_(user, id) {
   var rows = readTab_(TABS.LEADS, LEAD_COLS);
   for (var i = 0; i < rows.length; i++) {
     if (String(rows[i].id) === String(id)) {
-      if (user.role !== 'Admin' && String(rows[i].leadBy || '') !== user.name) {
+      if (user.role !== 'Admin' && !isOwner_(user, rows[i].leadBy)) {
         return { ok: false, message: 'You can only delete your own leads.' };
       }
       sh.getRange(i + 2, LEAD_COLS.indexOf('deleted') + 1).setValue('TRUE');
@@ -409,7 +496,7 @@ function addFollowup_(user, f) {
   if (idx < 0) return { ok: false, message: 'Lead not found.' };
 
   var lead = rows[idx];
-  if (user.role !== 'Admin' && String(lead.leadBy || '') !== user.name) {
+  if (user.role !== 'Admin' && !isOwner_(user, lead.leadBy)) {
     return { ok: false, message: 'You can only log follow-ups on your own leads.' };
   }
 
@@ -497,16 +584,61 @@ function saveSettings_(user, settings) {
   return { ok: true, settings: readSettings_() };
 }
 
-function saveUsers_(user, users) {
+// Merges the Admin's edits into the Users tab instead of overwriting it:
+//  - logins in `users` are added or updated (a blank PIN keeps the current one;
+//    a PIN typed here is stored as a temporary PIN that must be changed at sign-in)
+//  - only logins listed in `baseline` but missing from `users` are removed, so a
+//    login added from another phone in the meantime is never lost.
+function saveUsers_(user, users, baseline) {
   if (user.role !== 'Admin') return { ok: false, message: 'Only an Admin can manage staff.' };
+  users = (users || []).filter(function (u) { return u && u.username; });
   var sh = ss_().getSheetByName(TABS.USERS);
-  if (sh.getLastRow() > 1) sh.getRange(2, 1, sh.getLastRow() - 1, USER_COLS.length).clearContent();
-  var rows = (users || []).filter(function (u) { return u.username; }).map(function (u) {
-    return [String(u.username).trim().toLowerCase(), u.name || '', "'" + String(u.pin || '1234'),
-            u.role || 'Staff', "'" + String(u.mobile || ''), u.active === false ? 'FALSE' : 'TRUE'];
+  var current = readTab_(TABS.USERS, USER_COLS).filter(function (u) { return u.username; });
+  var byName = {};
+  current.forEach(function (u) { byName[String(u.username).trim().toLowerCase()] = u; });
+
+  var submitted = {};
+  users.forEach(function (u) {
+    var un = String(u.username).trim().toLowerCase();
+    if (!/^[a-z0-9._-]+$/.test(un)) return;
+    var pin = String(u.pin || '').trim();
+    if (pin && !/^\d{4,6}$/.test(pin)) return;
+    var prev = byName[un];
+    submitted[un] = {
+      username: un,
+      name: String(u.name || (prev && prev.name) || un),
+      pin: pin ? "'" + pin : (prev ? (isTempPin_(prev.pin) ? "'" + String(prev.pin) : String(prev.pin)) : ''),
+      role: u.role === 'Admin' ? 'Admin' : 'Staff',
+      mobile: "'" + String(u.mobile != null ? u.mobile : (prev && prev.mobile) || ''),
+      active: u.active === false ? 'FALSE' : 'TRUE'
+    };
   });
+
+  var removed = {};
+  (baseline || []).forEach(function (b) {
+    var un = String(b || '').trim().toLowerCase();
+    if (un && !submitted[un] && un !== user.username) removed[un] = true;
+  });
+
+  var out = [];
+  current.forEach(function (u) {
+    var un = String(u.username).trim().toLowerCase();
+    if (removed[un]) return;
+    if (submitted[un]) { out.push(submitted[un]); delete submitted[un]; return; }
+    out.push({ username: un, name: u.name, pin: isTempPin_(u.pin) ? "'" + String(u.pin) : String(u.pin), role: u.role, mobile: "'" + String(u.mobile || ''), active: String(u.active).toUpperCase() === 'FALSE' ? 'FALSE' : 'TRUE' });
+  });
+  Object.keys(submitted).forEach(function (un) {
+    if (!submitted[un].pin) return; // a new login needs a PIN
+    out.push(submitted[un]);
+  });
+
+  if (!out.some(function (u) { return u.role === 'Admin' && u.active === 'TRUE'; })) {
+    return { ok: false, message: 'Keep at least one active Admin.' };
+  }
+  var rows = out.map(function (u) { return USER_COLS.map(function (c) { return u[c]; }); });
+  if (sh.getLastRow() > 1) sh.getRange(2, 1, sh.getLastRow() - 1, USER_COLS.length).clearContent();
   if (rows.length) sh.getRange(2, 1, rows.length, USER_COLS.length).setValues(rows);
-  log_(user.name, 'update', 'users', '', rows.length + ' staff');
+  log_(user.name, 'update', 'users', '', rows.length + ' logins');
   return { ok: true };
 }
 
