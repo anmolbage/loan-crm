@@ -8,7 +8,7 @@
 window.LOAN_CONFIG = {
 
   // 👇 PASTE YOUR APPS SCRIPT WEB APP URL HERE
-  API_URL: 'PASTE_YOUR_APPS_SCRIPT_URL_HERE',
+  API_URL: 'https://script.google.com/macros/s/AKfycbxS1pW66sPKOIj7QJivS-_p0UYyYkQ7MSbBHzZO1s38AN7rlpsRD_UBR9U3IkaFY8-Y/exec',
 
   APP_NAME: 'Loan CRM',
   VERSION: '1.1.0',

@@ -82,7 +82,7 @@ That is the only file you need to edit.
 
 > A public repository is safe here: it contains no customer data and no PINs. All of that is in your Sheet, which stays private. The only thing in the repository is the script's web address, which is useless without a login.
 >
-> Already done for you: the app lives at **https://github.com/anmolbage/loan-crm** and is published at **https://anmolbage.github.io/loan-crm/**. After Step 3, just commit and push `js/config.js`.
+> Already done for you: the app lives at **https://github.com/anmolbage/loan-crm**, is published at **https://anmolbage.github.io/loan-crm/**, and `js/config.js` already points at your deployed script.
 
 ### Step 5 — Install on your phone
 
@@ -214,3 +214,15 @@ You can edit the Leads tab directly and the app picks it up on next sync. Just d
 ## A note on security
 
 PINs are hashed, wrong guesses are rate-limited, and every request is checked against the Users tab, so a disabled login stops working at once. It is still a simple tool rather than bank-grade software: the Sheet itself is the real vault, so keep it shared with no one, and only give logins to people you trust with the whole pipeline.
+
+## Updating the backend later (clasp)
+
+The script inside your Sheet is linked to `apps-script/` with [clasp](https://github.com/google/clasp) (the link lives in `apps-script/.clasp.json`, which is not committed). After editing `Code.gs`:
+
+```bash
+cd apps-script
+clasp push --force
+clasp update-deployment AKfycbxS1pW66sPKOIj7QJivS-_p0UYyYkQ7MSbBHzZO1s38AN7rlpsRD_UBR9U3IkaFY8-Y
+```
+
+The web app address stays the same, so the app needs no change.
