@@ -115,16 +115,18 @@ Staff see every lead but can only edit, move, follow up or delete their **own**.
 Every lead sits in one of these stages:
 
 ```
-Enquiry → Basic Documents Pending → Full Documents Pending → Application Generated
-        → Processing at RO → Sanctioned → Disbursed
-                                        ↘ Rejected / Dropped
+Prospect → Enquiry → Basic Documents Pending → Full Documents Pending → Application Generated
+         → Processing at RO → Sanctioned → Disbursed
+                                         ↘ Rejected / Dropped
 ```
+
+**Prospect** is someone you have shortlisted but not pitched yet. New leads still start at Enquiry; pick Prospect on the form when you add someone you haven't spoken to. A prospect left unpitched for 15 days shows up under *Stuck files*.
 
 Each stage belongs to a **phase**, and the phase is what the dashboard is built around:
 
 | Phase | Stages | Meaning |
 |---|---|---|
-| **With branch** | Enquiry → Application Generated | Branch work — you should be chasing these |
+| **With branch** | Prospect → Application Generated | Branch work — you should be chasing these |
 | **At RO** | Processing at RO | Out of your hands — waiting on Regional Office |
 | **Sanctioned** | Sanctioned | RO has said yes; documentation and disbursement are back with you |
 | **Disbursed** | Disbursed | Done |

@@ -76,6 +76,7 @@ function defaultSettings_() {
     //        sanctioned = sanctioned, disbursement pending | done = disbursed | lost = closed without disbursement
     // dateKey: which date column gets stamped when a lead enters that stage
     stages: [
+      { name: 'Prospect',                phase: 'branch',     dateKey: '' },  // shortlisted, not pitched yet
       { name: 'Enquiry',                 phase: 'branch',     dateKey: '' },
       { name: 'Basic Documents Pending', phase: 'branch',     dateKey: '' },
       { name: 'Full Documents Pending',  phase: 'branch',     dateKey: '' },
@@ -129,6 +130,7 @@ function setup() {
     props_().setProperty('SECRET', Utilities.getUuid() + Utilities.getUuid());
   }
   props_().setProperty('SETUP_DONE', '2');
+  props_().setProperty('MIGRATION', String(MIGRATIONS.length));
   Logger.log('Setup complete. Your starting PIN is in the Users tab. Now deploy as a Web app.');
   return 'Setup complete. Now deploy as a Web app.';
 }
@@ -140,6 +142,31 @@ function ensureSetup_() {
   lock.waitLock(20000);
   try { if (props_().getProperty('SETUP_DONE') !== '2') setup(); }
   finally { lock.releaseLock(); }
+}
+
+// One-time changes to an existing Sheet, run in order on the next request after an update.
+// A fresh setup already has them, so setup() marks them all as done.
+var MIGRATIONS = [
+  // 1: add the "Prospect" stage (shortlisted, not pitched yet) before Enquiry
+  function () {
+    var s = readSettings_();
+    if (s.stages.some(function (x) { return x.name === 'Prospect'; })) return;
+    s.stages.unshift({ name: 'Prospect', phase: 'branch', dateKey: '' });
+    writeSettings_(s);
+  }
+];
+function runMigrations_() {
+  var done = Number(props_().getProperty('MIGRATION') || 0);
+  if (done >= MIGRATIONS.length) return;
+  var lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    done = Number(props_().getProperty('MIGRATION') || 0);
+    for (var i = done; i < MIGRATIONS.length; i++) {
+      MIGRATIONS[i]();
+      props_().setProperty('MIGRATION', String(i + 1));
+    }
+  } finally { lock.releaseLock(); }
 }
 
 function ensureTab_(ss, name, cols) {
@@ -169,6 +196,7 @@ function doPost(e) {
     var req = JSON.parse(e.postData.contents || '{}');
     var action = req.action;
     ensureSetup_();
+    runMigrations_();
 
     if (action === 'ping') return json_({ ok: true, time: new Date().toISOString() });
     if (action === 'login') return json_(login_(req));
@@ -576,12 +604,16 @@ function deleteDealer_(user, id) {
 
 function saveSettings_(user, settings) {
   if (user.role !== 'Admin') return { ok: false, message: 'Only an Admin can change settings.' };
+  writeSettings_(settings);
+  log_(user.name, 'update', 'settings', '', '');
+  return { ok: true, settings: readSettings_() };
+}
+
+function writeSettings_(settings) {
   var sh = ss_().getSheetByName(TABS.SETTINGS);
   sh.getRange(2, 1, Math.max(sh.getLastRow() - 1, 1), 2).clearContent();
   var out = Object.keys(settings).map(function (k) { return [k, JSON.stringify(settings[k])]; });
   if (out.length) sh.getRange(2, 1, out.length, 2).setValues(out);
-  log_(user.name, 'update', 'settings', '', '');
-  return { ok: true, settings: readSettings_() };
 }
 
 // Merges the Admin's edits into the Users tab instead of overwriting it:

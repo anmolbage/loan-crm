@@ -609,7 +609,7 @@ function blankLead() {
   return {
     id: '', group: firstGroup, product: firstProd ? firstProd.code : '',
     name: '', mobile: '', city: '', branch: CFG.BRANCH_NAME,
-    amount: '', stage: Store.stageNames()[0] || 'Enquiry', stageSince: '',
+    amount: '', stage: Store.stageDef('Enquiry') ? 'Enquiry' : (Store.stageNames()[0] || 'Enquiry'), stageSince: '',
     source: CFG.SOURCES[0], sourceName: '', dealerId: '', nextFollowupDate: '', remarks: '',
     appGenDate: '', sentRODate: '', sanctionDate: '', disbDate: '',
     incomeSource: '', income: '', incomePeriod: 'Monthly', dependents: '', earners: '', familyNote: '',
