@@ -167,7 +167,7 @@ async function doLogin() {
     $('#loginMsg').textContent = network
       ? 'Cannot reach the server (' + err.message + '). Tap "Run connection check" below.'
       : err.message;
-    $('#netCheckBtn').classList.toggle('hidden', !network);
+    if ($('#netCheckBtn')) $('#netCheckBtn').classList.toggle('hidden', !network);
     pin = ''; drawDots();
   } finally {
     btn.disabled = false; btn.textContent = 'Sign in';
@@ -204,7 +204,8 @@ async function connectionCheck() {
   lines.push('', 'Take a screenshot of this box and send it to support.');
   show();
 }
-$('#netCheckBtn').addEventListener('click', connectionCheck);
+// optional chaining: an older cached index.html may not have the button yet
+$('#netCheckBtn')?.addEventListener('click', connectionCheck);
 $('#loginUser').addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
 document.addEventListener('keydown', e => {
   if ($('#login').classList.contains('hidden')) return;

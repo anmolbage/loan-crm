@@ -1,5 +1,5 @@
 /* Loan CRM — service worker (app shell cache, offline first) */
-const CACHE = 'loan-crm-v1.1.1';
+const CACHE = 'loan-crm-v1.1.2';
 const SHELL = [
   './',
   './index.html',
@@ -14,7 +14,10 @@ const SHELL = [
 
 self.addEventListener('install', e => {
   self.skipWaiting();
-  e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL).catch(() => {})));
+  // cache: 'reload' skips the browser's HTTP cache so the new version never stores old files
+  e.waitUntil(caches.open(CACHE)
+    .then(c => c.addAll(SHELL.map(u => new Request(u, { cache: 'reload' }))))
+    .catch(() => {}));
 });
 
 self.addEventListener('activate', e => {
@@ -28,12 +31,14 @@ self.addEventListener('fetch', e => {
   const req = e.request;
   if (req.method !== 'GET') return;                       // API writes never cached
   const url = new URL(req.url);
-  if (url.hostname.includes('script.google.com')) return; // always live
+  if (url.origin !== location.origin) return;             // Google API, fonts: browser handles them
 
-  // Network-first for the app shell so updates land quickly,
-  // falling back to cache when the phone is offline.
+  // Network-first for the app shell so updates land quickly, falling back to cache
+  // when the phone is offline. cache: 'no-cache' makes the browser re-check every
+  // file with GitHub instead of reusing its 10-minute HTTP copy, so a page never
+  // mixes an old index.html with a new app.js after an update.
   e.respondWith(
-    fetch(req)
+    fetch(req, { cache: 'no-cache' })
       .then(res => {
         if (res && res.status === 200 && url.origin === location.origin) {
           const copy = res.clone();
