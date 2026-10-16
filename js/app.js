@@ -800,7 +800,8 @@ $('#formSave').addEventListener('click', () => {
   collectForm();
   if (!formLead.name) { toast('Customer name is required', 'err'); return; }
   if (formLead.mobile && !/^\d{10}$/.test(formLead.mobile)) { toast('Mobile should be 10 digits', 'err'); return; }
-  if (!formLead.amount && !formLead.projectCost) { toast('Enter the loan amount or project cost', 'err'); return; }
+  // a prospect has not been pitched yet, so the amount may still be unknown
+  if (!formLead.amount && !formLead.projectCost && formLead.stage !== 'Prospect') { toast('Enter the loan amount or project cost', 'err'); return; }
   const existing = formLead.id ? Store.leads.find(l => l.id === formLead.id) : null;
   Store.saveLead(formLead);
   closeForm();

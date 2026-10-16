@@ -5,3 +5,4 @@ node_modules/
 .vscode/
 .clasp.json
 .clasprc.json
+apps-script/Import*.gs

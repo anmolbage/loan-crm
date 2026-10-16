@@ -70,7 +70,8 @@ function defaultSettings_() {
       { code: 'SRTO',     name: 'Small Road Transport Operator Loan', group: 'SME' },
       { code: 'ATL',      name: 'Agri Term Loan',                    group: 'Agri' },
       { code: 'Gold',     name: 'Gold Loan',                         group: 'Secured' },
-      { code: 'LATDR',    name: 'Loan Against Term Deposit',         group: 'Secured' }
+      { code: 'LATDR',    name: 'Loan Against Term Deposit',         group: 'Secured' },
+      { code: 'BT',       name: 'Loan Takeover / Balance Transfer',  group: 'Secured' }
     ],
     // phase: branch = with your team | ro = waiting on Regional Office |
     //        sanctioned = sanctioned, disbursement pending | done = disbursed | lost = closed without disbursement
@@ -152,6 +153,14 @@ var MIGRATIONS = [
     var s = readSettings_();
     if (s.stages.some(function (x) { return x.name === 'Prospect'; })) return;
     s.stages.unshift({ name: 'Prospect', phase: 'branch', dateKey: '' });
+    writeSettings_(s);
+  },
+  // 2: add the "BT" product (loan takeover / balance transfer from another bank)
+  function () {
+    var s = readSettings_();
+    if (s.products.some(function (p) { return p.code === 'BT'; })) return;
+    if (s.groups.indexOf('Secured') < 0) s.groups.push('Secured');
+    s.products.push({ code: 'BT', name: 'Loan Takeover / Balance Transfer', group: 'Secured' });
     writeSettings_(s);
   }
 ];
