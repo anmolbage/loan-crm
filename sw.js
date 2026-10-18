@@ -1,5 +1,5 @@
 /* Loan CRM — service worker (app shell cache, offline first) */
-const CACHE = 'loan-crm-v1.2.0';
+const CACHE = 'loan-crm-v1.2.1';
 const SHELL = [
   './',
   './index.html',

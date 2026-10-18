@@ -11,7 +11,10 @@ window.LOAN_CONFIG = {
   API_URL: 'https://script.google.com/macros/s/AKfycbxS1pW66sPKOIj7QJivS-_p0UYyYkQ7MSbBHzZO1s38AN7rlpsRD_UBR9U3IkaFY8-Y/exec',
 
   APP_NAME: 'Loan CRM',
-  VERSION: '1.2.0',
+  VERSION: '1.2.1',
+
+  // Borrower Profiles app (shown under More)
+  PROFILES_URL: 'https://anmolbage.github.io/borrower-profiles/',
 
   // Your branch — pre-filled on every new lead and printed on the shared proposal
   BRANCH_NAME: 'Ramgarh Cantt',

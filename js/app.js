@@ -1084,7 +1084,8 @@ function renderMore() {
     isAdmin ? { k: 'staff', i: ICON.users, t: 'Logins & PINs', s: Store.users.length + ' login' + (Store.users.length === 1 ? '' : 's') } : null,
     { k: 'pin', i: ICON.key, t: 'Change my PIN', s: 'Keep your account secure' },
     { k: 'theme', i: ICON.moon, t: 'Dark mode', s: dark ? 'On' : 'Follows your phone', toggle: dark },
-    isAdmin ? { k: 'sheet', i: ICON.sheet, t: 'Open Google Sheet', s: 'The database behind this app' } : null
+    isAdmin ? { k: 'sheet', i: ICON.sheet, t: 'Open Google Sheet', s: 'The database behind this app' } : null,
+    CFG.PROFILES_URL ? { k: 'profiles', i: ICON.users, t: 'Borrower Profiles', s: 'Customer profiles and product ideas' } : null
   ].filter(Boolean);
 
   $('#moreMenu').innerHTML = items.map(it => `
@@ -1106,6 +1107,7 @@ document.addEventListener('click', async e => {
   if (k === 'staff') editStaff();
   if (k === 'pin') changePin();
   if (k === 'sheet') window.open(CFG.SHEET_URL, '_blank');
+  if (k === 'profiles') window.open(CFG.PROFILES_URL, '_blank');
   if (k === 'theme') {
     const dark = document.documentElement.dataset.theme === 'dark';
     document.documentElement.dataset.theme = dark ? 'light' : 'dark';
