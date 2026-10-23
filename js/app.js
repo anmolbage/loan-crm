@@ -964,8 +964,8 @@ function renderCalendar() {
 
   const c = Store.calendar;
   $('#calReminder').innerHTML = c && c.on
-    ? `${ICON.cal} Reminders are on: each open follow-up is in your Google Calendar <b>“${esc(c.name)}”</b> with a phone notification at <b>${esc(c.time)}</b> on the day.`
-    : `${ICON.cal} Phone reminders are not switched on yet. Once they are, every follow-up date here also goes to your Google Calendar with a notification.`;
+    ? `${ICON.cal} Reminders are on: each open follow-up is a task in your Google Tasks list <b>“${esc(c.name)}”</b>, due on its date. It shows in Google Tasks and Google Calendar, and is ticked off when the lead closes.`
+    : `${ICON.cal} Phone reminders are not switched on yet. Once they are, every follow-up date here also becomes a Google Task due that day.`;
 }
 
 document.addEventListener('click', e => {
@@ -1139,7 +1139,7 @@ function renderMore() {
   const items = [
     { k: 'sync', i: ICON.cloud, t: 'Sync now', s: Store.queue.length ? Store.queue.length + ' pending change(s)' : 'Everything is up to date' },
     { k: 'export', i: ICON.down, t: 'Export CSV', s: 'Download the leads currently on screen' },
-    { k: 'calendar', i: ICON.cal, t: 'Follow-up calendar', s: Store.calendar && Store.calendar.on ? 'Phone reminders on · ' + Store.calendar.time : 'Follow-ups by date' },
+    { k: 'calendar', i: ICON.cal, t: 'Follow-up calendar', s: Store.calendar && Store.calendar.on ? 'Google Tasks reminders on · ' + Store.calendar.name : 'Follow-ups by date' },
     { k: 'dealers', i: ICON.store, t: 'DSE & Dealers', s: Store.dealers.length + ' contacts · car, CV, tractor dealers' },
     isAdmin ? { k: 'products', i: ICON.box, t: 'Products & groups', s: (Store.settings.products || []).length + ' products in ' + (Store.settings.groups || []).length + ' groups' } : null,
     isAdmin ? { k: 'stages', i: ICON.flow, t: 'Pipeline stages', s: (Store.settings.stages || []).length + ' stages' } : null,

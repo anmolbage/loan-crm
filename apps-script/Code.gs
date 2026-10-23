@@ -202,13 +202,13 @@ function doGet(e) {
   // (tries at most every 2 minutes until it works).
   if (props_().getProperty('CAL_ON') !== '1' && !CacheService.getScriptCache().get('cal_auto')) {
     CacheService.getScriptCache().put('cal_auto', '1', 120);
-    try { setupCalendar(); }
+    try { setupTasks(); }
     catch (err) { props_().setProperty('CAL_LAST_RESULT', 'setup error: ' + String(err && err.message || err).slice(0, 200)); }
   }
   // Public health check. Counts only — no customer data.
   var p = props_().getProperties();
   return json_({ ok: true, service: 'Loan CRM API', version: 1,
-    reminders: { on: p.CAL_ON === '1', events: Object.keys(p).filter(function (k) { return k.indexOf('cal:') === 0; }).length, lastSync: p.CAL_LAST || null, lastResult: p.CAL_LAST_RESULT || null } });
+    reminders: { on: p.CAL_ON === '1', kind: 'Google Tasks', tasks: Object.keys(p).filter(function (k) { return k.indexOf('task:') === 0; }).length, lastSync: p.CAL_LAST || null, lastResult: p.CAL_LAST_RESULT || null } });
 }
 
 function doPost(e) {
@@ -713,63 +713,61 @@ function saveUsers_(user, users, baseline) {
   return { ok: true };
 }
 
-// ============================================================ GOOGLE CALENDAR REMINDERS
-// Every open lead with a next follow-up date gets one event in the "Loan CRM Follow-ups"
-// calendar of the account that owns this script, at CAL_TIME on that day, with a phone
-// notification. Saves update it straight away; a 15-minute trigger re-checks everything
-// (so edits typed into the Sheet are picked up too). Run setupCalendar once to switch on.
-var CAL_NAME = 'Bank Events';    // your existing calendar; only events tagged 'Lead ID:' are ever touched
-var CAL_TIME = '09:30';           // 24-hour, script time zone
-var CAL_MINUTES = 15;             // event length
-var CAL_MAX_CHANGES = 60;         // per run — Google throttles bursts of calendar writes
+// ============================================================ GOOGLE TASKS REMINDERS
+// Every open lead with a next follow-up date gets one task in the "Bank Task" list of the
+// Google account that owns this script, due on that date (Google Tasks shows it in the
+// Tasks app and in Google Calendar, and notifies on the day). Moving the date moves the
+// task; closing the lead ticks it off; clearing the date or deleting the lead removes it.
+// Saves update it straight away; a 15-minute trigger re-checks everything (so edits typed
+// into the Sheet are picked up too). Needs the Google Tasks permission, granted once by
+// running setupTasks from the editor. (Property names keep their old CAL_ prefix.)
+var TASK_LIST = 'Bank Task';
+var TASK_MAX_CHANGES = 60;        // per run — Google throttles bursts of writes
 var APP_URL = 'https://anmolbage.github.io/loan-crm/';
 
-function setupCalendar() {
-  calendar_();                                      // create it now, so permission is asked here
+function setupTasks() {
+  taskList_();                                      // create it now, so permission is asked here
   props_().setProperty('CAL_ON', '1');
   ScriptApp.getProjectTriggers().forEach(function (t) {
-    if (t.getHandlerFunction() === 'syncCalendar') ScriptApp.deleteTrigger(t);
+    var fn = t.getHandlerFunction();
+    if (fn === 'syncTasks' || fn === 'syncCalendar') ScriptApp.deleteTrigger(t);
   });
-  ScriptApp.newTrigger('syncCalendar').timeBased().everyMinutes(15).create();
-  var r = syncCalendar();
-  Logger.log('Calendar reminders are ON. "' + CAL_NAME + '": ' + r.events + ' follow-ups, ' + r.changes + ' events written.' +
+  ScriptApp.newTrigger('syncTasks').timeBased().everyMinutes(15).create();
+  var r = syncTasks();
+  Logger.log('Follow-up tasks are ON. List "' + TASK_LIST + '": ' + r.events + ' follow-ups, ' + r.changes + ' tasks written.' +
              (r.pending ? ' ' + r.pending + ' more will be added over the next runs.' : ''));
   return r;
 }
+function setupCalendar() { return setupTasks(); }   // old name from earlier instructions
 
 function calOn_() { return props_().getProperty('CAL_ON') === '1'; }
-function calStatus_() {
-  var hm = CAL_TIME.split(':'), h = Number(hm[0]);
-  return { on: calOn_(), name: CAL_NAME, time: ((h + 11) % 12 + 1) + ':' + hm[1] + (h < 12 ? ' AM' : ' PM') };
+function calStatus_() { return { on: calOn_(), kind: 'tasks', name: TASK_LIST }; }
+
+function taskList_() {
+  var id = props_().getProperty('TASK_LIST_ID');
+  if (id) { try { Tasks.Tasklists.get(id); return id; } catch (e) { /* deleted by hand: find or recreate */ } }
+  var lists = (Tasks.Tasklists.list({ maxResults: 100 }).items || []).filter(function (l) { return l.title === TASK_LIST; });
+  id = lists.length ? lists[0].id : Tasks.Tasklists.insert({ title: TASK_LIST }).id;
+  props_().setProperty('TASK_LIST_ID', id);
+  return id;
 }
 
-function calendar_() {
-  var id = props_().getProperty('CAL_ID');
-  var cal = id ? CalendarApp.getCalendarById(id) : null;
-  if (!cal) {
-    var found = CalendarApp.getCalendarsByName(CAL_NAME);
-    cal = found.length ? found[0] : CalendarApp.createCalendar(CAL_NAME, { summary: 'Next follow-up dates from Loan CRM. Managed by the app — edit the lead, not the event.' });
-    props_().setProperty('CAL_ID', cal.getId());
-  }
-  return cal;
-}
-
-// After a lead is saved, followed up or deleted, bring its event up to date.
-// Calendar trouble must never fail the save itself.
+// After a lead is saved, followed up or deleted, bring its task up to date.
+// Tasks trouble must never fail the save itself.
 function afterLeadWrite_(result, leadId) {
   if (!result || result.ok === false || !leadId || !calOn_()) return result;
-  try { syncCalendar_(String(leadId)); }
-  catch (err) { log_('system', 'calendar-error', 'lead', leadId, String(err && err.message || err)); }
+  try { syncTasks_(String(leadId)); }
+  catch (err) { log_('system', 'tasks-error', 'lead', leadId, String(err && err.message || err)); }
   return result;
 }
 
 // Trigger entry point (every 15 minutes) and manual re-sync.
-function syncCalendar() {
+function syncTasks() {
   if (!calOn_()) return { changes: 0, events: 0, pending: 0 };
   var lock = LockService.getScriptLock();
   lock.waitLock(30000);
   try {
-    var r = syncCalendar_(null);
+    var r = syncTasks_(null);
     props_().setProperties({ CAL_LAST: new Date().toISOString(), CAL_LAST_RESULT: r.events + ' follow-ups, ' + r.changes + ' written, ' + r.pending + ' pending' });
     return r;
   } catch (err) {
@@ -777,74 +775,95 @@ function syncCalendar() {
     throw err;
   } finally { lock.releaseLock(); }
 }
+function syncCalendar() { return syncTasks(); }     // old trigger name, in case one is left over
 
-function syncCalendar_(onlyId) {
-  var cal = calendar_();
+// Tasks in the list that carry "Lead ID: x" in their notes, so a task made elsewhere
+// (or before the link was saved) is adopted rather than duplicated.
+function tasksByLead_(listId) {
+  var out = {}, token;
+  do {
+    var page = Tasks.Tasks.list(listId, { maxResults: 100, showCompleted: true, showHidden: true, pageToken: token });
+    (page.items || []).forEach(function (t) {
+      var m = /Lead ID: (\S+)/.exec(String(t.notes || ''));
+      if (m && !out[m[1]]) out[m[1]] = t.id;
+    });
+    token = page.nextPageToken;
+  } while (token);
+  return out;
+}
+
+function syncTasks_(onlyId) {
+  var listId = taskList_();
   var closed = {};
   (readSettings_().stages || []).forEach(function (st) { if (st.phase === 'done' || st.phase === 'lost') closed[st.name] = true; });
   var users = {};
   readTab_(TABS.USERS, USER_COLS).forEach(function (u) { users[String(u.username).trim().toLowerCase()] = u.name; });
   var store = props_(), all = store.getProperties(), today = todayStr_();
-  var seen = {}, changes = 0, events = 0, pending = 0;
+  var seen = {}, changes = 0, events = 0, pending = 0, byLead = null;
+  var get = function (taskId) { try { return Tasks.Tasks.get(listId, taskId); } catch (e) { return null; } };
+  var remove = function (taskId) { try { Tasks.Tasks.remove(listId, taskId); } catch (e) { /* already gone */ } };
 
   readTab_(TABS.LEADS, LEAD_COLS).forEach(function (l) {
     var id = String(l.id || '');
     if (!id || (onlyId && id !== onlyId)) return;
     seen[id] = true;
-    var key = 'cal:' + id, cur = all[key] ? JSON.parse(all[key]) : null;
+    var key = 'task:' + id, cur = all[key] ? JSON.parse(all[key]) : null;
     var date = toDateStr_(l.nextFollowupDate);
-    var wanted = date && String(l.deleted).toUpperCase() !== 'TRUE' && !closed[String(l.stage)];
+    var deleted = String(l.deleted).toUpperCase() === 'TRUE';
+    var isClosed = !!closed[String(l.stage)];
 
-    if (!wanted) {                                   // no date, closed or deleted: remove its event
-      if (cur) { deleteEvent_(cal, cur.e); store.deleteProperty(key); changes++; }
+    if (!date || deleted) {                          // no date or deleted lead: remove its task
+      if (cur) { remove(cur.t); store.deleteProperty(key); changes++; }
+      return;
+    }
+    if (isClosed) {                                  // closed lead: tick its task off, keep it as history
+      if (cur && cur.s !== 'closed') {
+        if (changes >= TASK_MAX_CHANGES) { pending++; return; }
+        try { Tasks.Tasks.patch({ status: 'completed' }, listId, cur.t); } catch (e) {}
+        store.setProperty(key, JSON.stringify({ t: cur.t, s: 'closed' })); changes++;
+      }
       return;
     }
     events++;
-    if (!cur && date < today) return;                // never create reminders for days already gone
+    if (!cur && date < today) return;                // never create tasks for days already gone
+
     var owner = users[String(l.leadBy || '').toLowerCase()] || String(l.leadBy || '');
     var title = 'Follow up: ' + l.name + ' (' + l.product + ')' + (l.leadBy && l.leadBy !== 'admin' ? ' · ' + owner : '');
     var mobile = String(l.mobile || '').replace(/\D/g, '');
-    var desc = [
+    var notes = [
       l.name + (mobile ? ' · ' + mobile : ''),
       l.product + ' · ' + l.stage + (l.city ? ' · ' + l.city : ''),
       l.remarks ? 'Latest: ' + String(l.remarks).slice(0, 400) : '',
       '',
       mobile ? 'Call: tel:' + mobile : '',
       'Open Loan CRM: ' + APP_URL,
-      'Lead ID: ' + id                               // lets the sync recognise events made elsewhere
+      'Lead ID: ' + id
     ].filter(function (x, i) { return x !== '' || i === 3; }).join('\n');
-    var sig = Utilities.base64EncodeWebSafe(Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, [date, CAL_TIME, title, desc].join('|')));
+    var sig = Utilities.base64EncodeWebSafe(Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, [date, title, notes].join('|')));
     if (cur && cur.s === sig) return;                // already up to date
-    if (changes >= CAL_MAX_CHANGES) { pending++; return; }
+    if (changes >= TASK_MAX_CHANGES) { pending++; return; }
 
-    var start = Utilities.parseDate(date + ' ' + CAL_TIME, Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm');
-    var end = new Date(start.getTime() + CAL_MINUTES * 60000);
-    var ev = cur ? cal.getEventById(cur.e) : null;
-    if (!ev) {                                       // adopt an event already made for this lead (e.g. added by hand)
-      ev = cal.getEventsForDay(start).filter(function (x) { return String(x.getDescription() || '').indexOf('Lead ID: ' + id) >= 0; })[0] || null;
+    var body = { title: title, notes: notes, due: date + 'T00:00:00.000Z', status: 'needsAction' };
+    var taskId = cur && cur.t;
+    if (!taskId) {                                   // adopt a task already made for this lead
+      if (!byLead) byLead = tasksByLead_(listId);
+      taskId = byLead[id] || null;
     }
-    if (ev) { ev.setTitle(title); ev.setTime(start, end); ev.setDescription(desc); }
-    else ev = cal.createEvent(title, start, end, { description: desc });
-    ev.removeAllReminders();
-    ev.addPopupReminder(0);                           // notify at CAL_TIME on the day
-    store.setProperty(key, JSON.stringify({ e: ev.getId(), s: sig }));
+    if (taskId && get(taskId)) Tasks.Tasks.patch(body, listId, taskId);
+    else taskId = Tasks.Tasks.insert(body, listId).id;
+    store.setProperty(key, JSON.stringify({ t: taskId, s: sig }));
     changes++;
   });
 
   if (!onlyId) {                                      // rows removed from the Sheet by hand
     Object.keys(all).forEach(function (k) {
-      if (k.indexOf('cal:') === 0 && !seen[k.slice(4)]) {
-        try { deleteEvent_(cal, JSON.parse(all[k]).e); } catch (e) {}
+      if (k.indexOf('task:') === 0 && !seen[k.slice(5)]) {
+        try { remove(JSON.parse(all[k]).t); } catch (e) {}
         store.deleteProperty(k); changes++;
       }
     });
   }
   return { changes: changes, events: events, pending: pending };
-}
-
-function deleteEvent_(cal, eventId) {
-  var ev = cal.getEventById(eventId);
-  if (ev) ev.deleteEvent();
 }
 
 function log_(by, action, entity, entityId, detail) {
