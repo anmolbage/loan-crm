@@ -198,7 +198,17 @@ function ss_() { return SS_ || (SS_ = SpreadsheetApp.openById(SHEET_ID)); }
 
 // ============================================================ ROUTING
 function doGet(e) {
-  return json_({ ok: true, service: 'Loan CRM API', version: 1 });
+  // Switch reminders on by itself once calendar permission has been granted in the editor
+  // (tries at most every 2 minutes until it works).
+  if (props_().getProperty('CAL_ON') !== '1' && !CacheService.getScriptCache().get('cal_auto')) {
+    CacheService.getScriptCache().put('cal_auto', '1', 120);
+    try { setupCalendar(); }
+    catch (err) { props_().setProperty('CAL_LAST_RESULT', 'setup error: ' + String(err && err.message || err).slice(0, 200)); }
+  }
+  // Public health check. Counts only — no customer data.
+  var p = props_().getProperties();
+  return json_({ ok: true, service: 'Loan CRM API', version: 1,
+    reminders: { on: p.CAL_ON === '1', events: Object.keys(p).filter(function (k) { return k.indexOf('cal:') === 0; }).length, lastSync: p.CAL_LAST || null, lastResult: p.CAL_LAST_RESULT || null } });
 }
 
 function doPost(e) {
@@ -708,7 +718,7 @@ function saveUsers_(user, users, baseline) {
 // calendar of the account that owns this script, at CAL_TIME on that day, with a phone
 // notification. Saves update it straight away; a 15-minute trigger re-checks everything
 // (so edits typed into the Sheet are picked up too). Run setupCalendar once to switch on.
-var CAL_NAME = 'Loan CRM Follow-ups';
+var CAL_NAME = 'Bank Events';    // your existing calendar; only events tagged 'Lead ID:' are ever touched
 var CAL_TIME = '09:30';           // 24-hour, script time zone
 var CAL_MINUTES = 15;             // event length
 var CAL_MAX_CHANGES = 60;         // per run — Google throttles bursts of calendar writes
@@ -758,7 +768,14 @@ function syncCalendar() {
   if (!calOn_()) return { changes: 0, events: 0, pending: 0 };
   var lock = LockService.getScriptLock();
   lock.waitLock(30000);
-  try { return syncCalendar_(null); } finally { lock.releaseLock(); }
+  try {
+    var r = syncCalendar_(null);
+    props_().setProperties({ CAL_LAST: new Date().toISOString(), CAL_LAST_RESULT: r.events + ' follow-ups, ' + r.changes + ' written, ' + r.pending + ' pending' });
+    return r;
+  } catch (err) {
+    props_().setProperties({ CAL_LAST: new Date().toISOString(), CAL_LAST_RESULT: 'error: ' + String(err && err.message || err).slice(0, 200) });
+    throw err;
+  } finally { lock.releaseLock(); }
 }
 
 function syncCalendar_(onlyId) {
@@ -793,7 +810,8 @@ function syncCalendar_(onlyId) {
       l.remarks ? 'Latest: ' + String(l.remarks).slice(0, 400) : '',
       '',
       mobile ? 'Call: tel:' + mobile : '',
-      'Open Loan CRM: ' + APP_URL
+      'Open Loan CRM: ' + APP_URL,
+      'Lead ID: ' + id                               // lets the sync recognise events made elsewhere
     ].filter(function (x, i) { return x !== '' || i === 3; }).join('\n');
     var sig = Utilities.base64EncodeWebSafe(Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, [date, CAL_TIME, title, desc].join('|')));
     if (cur && cur.s === sig) return;                // already up to date
@@ -802,6 +820,9 @@ function syncCalendar_(onlyId) {
     var start = Utilities.parseDate(date + ' ' + CAL_TIME, Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm');
     var end = new Date(start.getTime() + CAL_MINUTES * 60000);
     var ev = cur ? cal.getEventById(cur.e) : null;
+    if (!ev) {                                       // adopt an event already made for this lead (e.g. added by hand)
+      ev = cal.getEventsForDay(start).filter(function (x) { return String(x.getDescription() || '').indexOf('Lead ID: ' + id) >= 0; })[0] || null;
+    }
     if (ev) { ev.setTitle(title); ev.setTime(start, end); ev.setDescription(desc); }
     else ev = cal.createEvent(title, start, end, { description: desc });
     ev.removeAllReminders();
