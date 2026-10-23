@@ -217,9 +217,10 @@ function doPost(e) {
 
     switch (action) {
       case 'bootstrap':    return json_(bootstrap_(user, req.since));
-      case 'saveLead':     lock.waitLock(20000); return json_(saveLead_(user, req.lead));
-      case 'deleteLead':   lock.waitLock(20000); return json_(deleteLead_(user, req.id));
-      case 'addFollowup':  lock.waitLock(20000); return json_(addFollowup_(user, req.followup));
+      case 'saveLead':     lock.waitLock(20000); var saved = saveLead_(user, req.lead);
+                           return json_(afterLeadWrite_(saved, saved && saved.lead ? saved.lead.id : req.lead && req.lead.id));
+      case 'deleteLead':   lock.waitLock(20000); return json_(afterLeadWrite_(deleteLead_(user, req.id), req.id));
+      case 'addFollowup':  lock.waitLock(20000); return json_(afterLeadWrite_(addFollowup_(user, req.followup), req.followup && req.followup.leadId));
       case 'saveDealer':   lock.waitLock(20000); return json_(saveDealer_(user, req.dealer));
       case 'deleteDealer': lock.waitLock(20000); return json_(deleteDealer_(user, req.id));
       case 'saveSettings': lock.waitLock(20000); return json_(saveSettings_(user, req.settings));
@@ -391,7 +392,7 @@ function bootstrap_(user, since) {
       o.createdAt = toIso_(d.createdAt); o.updatedAt = toIso_(d.updatedAt); delete o.deleted; return o;
     });
 
-  return { ok: true, delta: delta, user: user, leads: leads, removed: removed, followups: followups, users: users, dealers: dealers, settings: readSettings_(), serverTime: new Date().toISOString() };
+  return { ok: true, delta: delta, user: user, leads: leads, removed: removed, followups: followups, users: users, dealers: dealers, settings: readSettings_(), calendar: calStatus_(), serverTime: new Date().toISOString() };
 }
 
 function normalizeLead_(l) {
@@ -700,6 +701,129 @@ function saveUsers_(user, users, baseline) {
   if (rows.length) sh.getRange(2, 1, rows.length, USER_COLS.length).setValues(rows);
   log_(user.name, 'update', 'users', '', rows.length + ' logins');
   return { ok: true };
+}
+
+// ============================================================ GOOGLE CALENDAR REMINDERS
+// Every open lead with a next follow-up date gets one event in the "Loan CRM Follow-ups"
+// calendar of the account that owns this script, at CAL_TIME on that day, with a phone
+// notification. Saves update it straight away; a 15-minute trigger re-checks everything
+// (so edits typed into the Sheet are picked up too). Run setupCalendar once to switch on.
+var CAL_NAME = 'Loan CRM Follow-ups';
+var CAL_TIME = '09:30';           // 24-hour, script time zone
+var CAL_MINUTES = 15;             // event length
+var CAL_MAX_CHANGES = 60;         // per run — Google throttles bursts of calendar writes
+var APP_URL = 'https://anmolbage.github.io/loan-crm/';
+
+function setupCalendar() {
+  calendar_();                                      // create it now, so permission is asked here
+  props_().setProperty('CAL_ON', '1');
+  ScriptApp.getProjectTriggers().forEach(function (t) {
+    if (t.getHandlerFunction() === 'syncCalendar') ScriptApp.deleteTrigger(t);
+  });
+  ScriptApp.newTrigger('syncCalendar').timeBased().everyMinutes(15).create();
+  var r = syncCalendar();
+  Logger.log('Calendar reminders are ON. "' + CAL_NAME + '": ' + r.events + ' follow-ups, ' + r.changes + ' events written.' +
+             (r.pending ? ' ' + r.pending + ' more will be added over the next runs.' : ''));
+  return r;
+}
+
+function calOn_() { return props_().getProperty('CAL_ON') === '1'; }
+function calStatus_() {
+  var hm = CAL_TIME.split(':'), h = Number(hm[0]);
+  return { on: calOn_(), name: CAL_NAME, time: ((h + 11) % 12 + 1) + ':' + hm[1] + (h < 12 ? ' AM' : ' PM') };
+}
+
+function calendar_() {
+  var id = props_().getProperty('CAL_ID');
+  var cal = id ? CalendarApp.getCalendarById(id) : null;
+  if (!cal) {
+    var found = CalendarApp.getCalendarsByName(CAL_NAME);
+    cal = found.length ? found[0] : CalendarApp.createCalendar(CAL_NAME, { summary: 'Next follow-up dates from Loan CRM. Managed by the app — edit the lead, not the event.' });
+    props_().setProperty('CAL_ID', cal.getId());
+  }
+  return cal;
+}
+
+// After a lead is saved, followed up or deleted, bring its event up to date.
+// Calendar trouble must never fail the save itself.
+function afterLeadWrite_(result, leadId) {
+  if (!result || result.ok === false || !leadId || !calOn_()) return result;
+  try { syncCalendar_(String(leadId)); }
+  catch (err) { log_('system', 'calendar-error', 'lead', leadId, String(err && err.message || err)); }
+  return result;
+}
+
+// Trigger entry point (every 15 minutes) and manual re-sync.
+function syncCalendar() {
+  if (!calOn_()) return { changes: 0, events: 0, pending: 0 };
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try { return syncCalendar_(null); } finally { lock.releaseLock(); }
+}
+
+function syncCalendar_(onlyId) {
+  var cal = calendar_();
+  var closed = {};
+  (readSettings_().stages || []).forEach(function (st) { if (st.phase === 'done' || st.phase === 'lost') closed[st.name] = true; });
+  var users = {};
+  readTab_(TABS.USERS, USER_COLS).forEach(function (u) { users[String(u.username).trim().toLowerCase()] = u.name; });
+  var store = props_(), all = store.getProperties(), today = todayStr_();
+  var seen = {}, changes = 0, events = 0, pending = 0;
+
+  readTab_(TABS.LEADS, LEAD_COLS).forEach(function (l) {
+    var id = String(l.id || '');
+    if (!id || (onlyId && id !== onlyId)) return;
+    seen[id] = true;
+    var key = 'cal:' + id, cur = all[key] ? JSON.parse(all[key]) : null;
+    var date = toDateStr_(l.nextFollowupDate);
+    var wanted = date && String(l.deleted).toUpperCase() !== 'TRUE' && !closed[String(l.stage)];
+
+    if (!wanted) {                                   // no date, closed or deleted: remove its event
+      if (cur) { deleteEvent_(cal, cur.e); store.deleteProperty(key); changes++; }
+      return;
+    }
+    events++;
+    if (!cur && date < today) return;                // never create reminders for days already gone
+    var owner = users[String(l.leadBy || '').toLowerCase()] || String(l.leadBy || '');
+    var title = 'Follow up: ' + l.name + ' (' + l.product + ')' + (l.leadBy && l.leadBy !== 'admin' ? ' · ' + owner : '');
+    var mobile = String(l.mobile || '').replace(/\D/g, '');
+    var desc = [
+      l.name + (mobile ? ' · ' + mobile : ''),
+      l.product + ' · ' + l.stage + (l.city ? ' · ' + l.city : ''),
+      l.remarks ? 'Latest: ' + String(l.remarks).slice(0, 400) : '',
+      '',
+      mobile ? 'Call: tel:' + mobile : '',
+      'Open Loan CRM: ' + APP_URL
+    ].filter(function (x, i) { return x !== '' || i === 3; }).join('\n');
+    var sig = Utilities.base64EncodeWebSafe(Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, [date, CAL_TIME, title, desc].join('|')));
+    if (cur && cur.s === sig) return;                // already up to date
+    if (changes >= CAL_MAX_CHANGES) { pending++; return; }
+
+    var start = Utilities.parseDate(date + ' ' + CAL_TIME, Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm');
+    var end = new Date(start.getTime() + CAL_MINUTES * 60000);
+    var ev = cur ? cal.getEventById(cur.e) : null;
+    if (ev) { ev.setTitle(title); ev.setTime(start, end); ev.setDescription(desc); }
+    else ev = cal.createEvent(title, start, end, { description: desc });
+    ev.removeAllReminders();
+    ev.addPopupReminder(0);                           // notify at CAL_TIME on the day
+    store.setProperty(key, JSON.stringify({ e: ev.getId(), s: sig }));
+    changes++;
+  });
+
+  if (!onlyId) {                                      // rows removed from the Sheet by hand
+    Object.keys(all).forEach(function (k) {
+      if (k.indexOf('cal:') === 0 && !seen[k.slice(4)]) {
+        try { deleteEvent_(cal, JSON.parse(all[k]).e); } catch (e) {}
+        store.deleteProperty(k); changes++;
+      }
+    });
+  }
+  return { changes: changes, events: events, pending: pending };
+}
+
+function deleteEvent_(cal, eventId) {
+  var ev = cal.getEventById(eventId);
+  if (ev) ev.deleteEvent();
 }
 
 function log_(by, action, entity, entityId, detail) {

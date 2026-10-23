@@ -29,6 +29,7 @@ const Store = {
   syncing: false,
   lastSync: null,
   lastError: null,   // why the last sync failed, shown on Home until one succeeds
+  calendar: null,    // { on, name, time } — Google Calendar reminder status from the server
   cursor: null,      // serverTime of the last reply; the next sync asks for changes since then
   listeners: [],
 
@@ -49,6 +50,7 @@ const Store = {
         this.settings = c.settings || this.settings;
         this.lastSync = c.lastSync || null;
         this.cursor = c.cursor || null;
+        this.calendar = c.calendar || null;
       }
     } catch (e) {}
     try { this.queue = JSON.parse(localStorage.getItem(LS.QUEUE) || '[]'); } catch (e) { this.queue = []; }
@@ -58,7 +60,7 @@ const Store = {
     try {
       localStorage.setItem(LS.CACHE, JSON.stringify({
         leads: this.leads, followups: this.followups,
-        users: this.users, dealers: this.dealers, settings: this.settings, lastSync: this.lastSync, cursor: this.cursor
+        users: this.users, dealers: this.dealers, settings: this.settings, lastSync: this.lastSync, cursor: this.cursor, calendar: this.calendar
       }));
       localStorage.setItem(LS.QUEUE, JSON.stringify(this.queue));
     } catch (e) { console.warn('cache write failed', e); }
@@ -157,6 +159,7 @@ const Store = {
     this.users = r.users || [];
     this.dealers = r.dealers || [];
     this.settings = r.settings || this.settings;
+    if (r.calendar) this.calendar = r.calendar;
     if (r.user) this.setSession(this.token, r.user);
     this.cursor = r.serverTime || null;
     this.lastSync = new Date().toISOString();

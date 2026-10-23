@@ -222,7 +222,7 @@ let current = 'home';
 function go(screen) {
   current = screen;
   $$('.screen').forEach(s => s.classList.toggle('active', s.id === 's-' + screen));
-  $$('.nav button[data-go]').forEach(b => b.classList.toggle('on', b.dataset.go === (screen === 'dealers' ? 'more' : screen)));
+  $$('.nav button[data-go]').forEach(b => b.classList.toggle('on', b.dataset.go === ({ dealers: 'more', calendar: 'chase' }[screen] || screen)));
   window.scrollTo({ top: 0 });
   render();
 }
@@ -880,7 +880,8 @@ function openFollowupForm(id) {
 let chaseTab = 'due';
 function renderChase() {
   const tabs = [['due', 'Due & overdue'], ['stuck', 'Stuck files'], ['team', 'With branch'], ['ro', 'At RO'], ['sanc', 'To disburse'], ['week', 'Next 7 days'], ['done', 'Recent activity']];
-  $('#chaseChips').innerHTML = tabs.map(([k, t]) => `<button class="chip${chaseTab === k ? ' on' : ''}" data-ctab="${k}">${t}</button>`).join('');
+  $('#chaseChips').innerHTML = `<button class="chip" data-go="calendar">${ICON.cal} Calendar</button>` +
+    tabs.map(([k, t]) => `<button class="chip${chaseTab === k ? ' on' : ''}" data-ctab="${k}">${t}</button>`).join('');
 
   const scope = Store.leads;
   let html = '', note = '';
@@ -914,6 +915,66 @@ function emptyBlock(t, p) { return `<div class="empty">${ICON.inbox}<b>${esc(t)}
 document.addEventListener('click', e => {
   const t = e.target.closest('[data-ctab]');
   if (t) { chaseTab = t.dataset.ctab; renderChase(); }
+});
+
+/* ============================================================
+   CALENDAR — open follow-ups by date
+   ============================================================ */
+let calMonth = todayStr().slice(0, 7);   // 'YYYY-MM' being shown
+let calSel = todayStr();                // selected day
+const ymd = d => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+
+function followupsByDate() {
+  const map = {};
+  Store.leads.forEach(l => {
+    if (Store.isClosed(l) || !l.nextFollowupDate) return;
+    const d = String(l.nextFollowupDate).slice(0, 10);
+    (map[d] = map[d] || []).push(l);
+  });
+  return map;
+}
+
+function renderCalendar() {
+  const map = followupsByDate();
+  const today = todayStr();
+  const [y, m] = calMonth.split('-').map(Number);
+  const first = new Date(y, m - 1, 1);
+  $('#calMonth').textContent = first.toLocaleDateString('en-IN', { month: 'long', year: 'numeric' });
+
+  // 6 weeks starting on the Monday on or before the 1st
+  const start = new Date(first); start.setDate(1 - ((first.getDay() + 6) % 7));
+  let cells = '';
+  for (let i = 0; i < 42; i++) {
+    const d = new Date(start); d.setDate(start.getDate() + i);
+    const key = ymd(d), n = (map[key] || []).length;
+    const cls = ['cal-day', d.getMonth() !== m - 1 ? 'out' : '', key === today ? 'today' : '', key === calSel ? 'sel' : '', n && key < today ? 'over' : ''].filter(Boolean).join(' ');
+    cells += `<button class="${cls}" data-cday="${key}" aria-label="${key}${n ? ', ' + n + ' follow-ups' : ''}"><span>${d.getDate()}</span>${n ? `<span class="n">${n}</span>` : '<span style="height:18px"></span>'}</button>`;
+  }
+  $('#calGrid').innerHTML = cells;
+
+  // the chosen day's list; on today, overdue files are listed after
+  const dayLeads = (map[calSel] || []).slice().sort((a, b) => String(a.name).localeCompare(String(b.name)));
+  const overdue = calSel === today
+    ? Object.keys(map).filter(k => k < today).sort().flatMap(k => map[k]) : [];
+  const label = calSel === today ? 'Today' : prettyDate(calSel);
+  $('#calDayTitle').textContent = label + ' · ' + dayLeads.length + ' follow-up' + (dayLeads.length === 1 ? '' : 's');
+  let html = dayLeads.length ? dayLeads.map(leadCard).join('') : emptyBlock('Nothing planned', 'Set a next follow-up date on a lead and it shows here.');
+  if (overdue.length) html += `<div class="sec-head" style="margin-top:14px"><h2 style="color:var(--danger)">Overdue · ${overdue.length}</h2></div>` + overdue.map(leadCard).join('');
+  $('#calDayList').innerHTML = html;
+
+  const c = Store.calendar;
+  $('#calReminder').innerHTML = c && c.on
+    ? `${ICON.cal} Reminders are on: each open follow-up is in your Google Calendar <b>“${esc(c.name)}”</b> with a phone notification at <b>${esc(c.time)}</b> on the day.`
+    : `${ICON.cal} Phone reminders are not switched on yet. Once they are, every follow-up date here also goes to your Google Calendar with a notification.`;
+}
+
+document.addEventListener('click', e => {
+  const d = e.target.closest('[data-cday]');
+  if (d) { calSel = d.dataset.cday; if (calSel.slice(0, 7) !== calMonth) calMonth = calSel.slice(0, 7); renderCalendar(); return; }
+  const step = n => { const [y, m] = calMonth.split('-').map(Number); const t = new Date(y, m - 1 + n, 1); calMonth = ymd(t).slice(0, 7); renderCalendar(); };
+  if (e.target.closest('#calPrev')) step(-1);
+  if (e.target.closest('#calNext')) step(1);
+  if (e.target.closest('#calToday')) { calSel = todayStr(); calMonth = calSel.slice(0, 7); renderCalendar(); }
 });
 
 /* ============================================================
@@ -1078,6 +1139,7 @@ function renderMore() {
   const items = [
     { k: 'sync', i: ICON.cloud, t: 'Sync now', s: Store.queue.length ? Store.queue.length + ' pending change(s)' : 'Everything is up to date' },
     { k: 'export', i: ICON.down, t: 'Export CSV', s: 'Download the leads currently on screen' },
+    { k: 'calendar', i: ICON.cal, t: 'Follow-up calendar', s: Store.calendar && Store.calendar.on ? 'Phone reminders on · ' + Store.calendar.time : 'Follow-ups by date' },
     { k: 'dealers', i: ICON.store, t: 'DSE & Dealers', s: Store.dealers.length + ' contacts · car, CV, tractor dealers' },
     isAdmin ? { k: 'products', i: ICON.box, t: 'Products & groups', s: (Store.settings.products || []).length + ' products in ' + (Store.settings.groups || []).length + ' groups' } : null,
     isAdmin ? { k: 'stages', i: ICON.flow, t: 'Pipeline stages', s: (Store.settings.stages || []).length + ' stages' } : null,
@@ -1102,6 +1164,7 @@ document.addEventListener('click', async e => {
   if (k === 'sync') { await doSync(); }
   if (k === 'export') exportCSV();
   if (k === 'dealers') go('dealers');
+  if (k === 'calendar') go('calendar');
   if (k === 'products') editProducts();
   if (k === 'stages') editStages();
   if (k === 'staff') editStaff();
@@ -1379,6 +1442,7 @@ function render() {
   if (current === 'leads') renderLeads();
   if (current === 'chase') renderChase();
   if (current === 'dealers') renderDealers();
+  if (current === 'calendar') renderCalendar();
   if (current === 'more') renderMore();
 }
 Store.on(() => { if (!$('#app').classList.contains('hidden')) render(); });

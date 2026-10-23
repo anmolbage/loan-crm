@@ -52,6 +52,9 @@
         <h1 id="greetName">Hello</h1>
         <div class="sub" id="greetSub"></div>
       </div>
+      <button class="iconbtn" data-go="calendar" title="Follow-up calendar">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
+      </button>
       <button class="iconbtn" id="syncBtn" title="Sync">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
       </button>
@@ -125,6 +128,33 @@
     <div class="chips" id="chaseChips"></div>
     <div id="chaseNote" style="padding:0 18px 10px;font-size:12.5px;color:var(--text-3);font-weight:600"></div>
     <div class="list" id="chaseList"></div>
+  </section>
+
+  <!-- ---------- CALENDAR (follow-ups by date) ---------- -->
+  <section class="screen" id="s-calendar">
+    <div class="topbar">
+      <button class="iconbtn" data-go="chase" title="Back">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+      </button>
+      <h1 style="flex:1">Calendar</h1>
+      <button class="btn ghost sm" id="calToday">Today</button>
+    </div>
+    <div class="sec">
+      <div class="card cal">
+        <div class="cal-head">
+          <button class="iconbtn" id="calPrev" title="Previous month"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg></button>
+          <b id="calMonth"></b>
+          <button class="iconbtn" id="calNext" title="Next month"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg></button>
+        </div>
+        <div class="cal-grid cal-dow"><span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span><span>Sat</span><span>Sun</span></div>
+        <div class="cal-grid" id="calGrid"></div>
+      </div>
+      <div id="calReminder" class="cal-note"></div>
+    </div>
+    <div class="sec">
+      <div class="sec-head"><h2 id="calDayTitle"></h2></div>
+      <div class="list" id="calDayList" style="padding:0"></div>
+    </div>
   </section>
 
   <!-- ---------- DEALERS ---------- -->
