@@ -799,7 +799,9 @@ function pullFromTasks_() {
   if (!Object.keys(byTask).length) return { done: 0, moved: 0 };
 
   var listId = taskList_();
-  var since = all.CAL_LAST ? new Date(new Date(all.CAL_LAST).getTime() - 10 * 60000).toISOString() : null;
+  // first run reads every task once, so ticks made before this feature existed are caught up
+  var since = all.PULL_INIT && all.CAL_LAST ? new Date(new Date(all.CAL_LAST).getTime() - 10 * 60000).toISOString() : null;
+  if (!all.PULL_INIT) store.setProperty('PULL_INIT', new Date().toISOString());
   var changed = [], token;
   do {
     var q = { maxResults: 100, showCompleted: true, showHidden: true, pageToken: token };
