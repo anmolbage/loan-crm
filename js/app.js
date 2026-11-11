@@ -243,6 +243,9 @@ window.addEventListener('scroll', () => {
 const sum = (arr, k = 'amount') => arr.reduce((s, l) => s + (Number(l[k]) || 0), 0);
 const byPhase = (arr, p) => arr.filter(l => Store.phaseOf(l) === p);
 const isDue = l => !Store.isClosed(l) && l.nextFollowupDate && daysFrom(l.nextFollowupDate) <= 0;
+// open lead with no next date that is being worked (untouched imported prospects are left out)
+const needsNextDate = l => !Store.isClosed(l) && !l.nextFollowupDate &&
+  (l.stage !== 'Prospect' || Store.followups.some(f => f.leadId === l.id));
 const isStuck = l => !Store.isClosed(l) && Store.phaseOf(l) !== 'ro' && ageDays(l) >= CFG.STUCK_DAYS;
 
 function renderHome() {
@@ -307,6 +310,8 @@ function renderHome() {
   let b = '';
   if (!navigator.onLine) b += `<div class="banner offline">${ICON.cloud}Offline — changes are saved on this phone and will sync automatically.</div>`;
   if (Store.queue.length) b += `<div class="banner sync">${ICON.cloud}${Store.queue.length} change${Store.queue.length === 1 ? '' : 's'} waiting to sync.</div>`;
+  const noDate = Store.leads.filter(needsNextDate).length;
+  if (noDate) b += `<div class="banner sync" data-chase="nodate" style="cursor:pointer">${ICON.cal}${noDate} lead${noDate === 1 ? '' : 's'} need${noDate === 1 ? 's' : ''} a next follow-up date — tap to plan.</div>`;
   b += syncBanner();
   $('#homeBanner').innerHTML = b;
 }
@@ -850,26 +855,54 @@ $('#formSave').addEventListener('click', () => {
 /* ============================================================
    FOLLOW-UP FORM
    ============================================================ */
+// The next date must be chosen on purpose: the old date is never pre-filled, because
+// saving it unchanged left the follow-up (and its Google Task) stuck on a past day.
+const addDays = n => { const d = new Date(todayStr() + 'T00:00:00'); d.setDate(d.getDate() + n); return ymd(d); };
+const NEXT_CHOICES = [['1', 'Tomorrow'], ['3', '3 days'], ['7', '1 week'], ['14', '2 weeks'], ['30', '1 month'], ['pick', 'Pick date'], ['none', 'No next follow-up']];
+
 function openFollowupForm(id) {
   const l = Store.leads.find(x => x.id === id); if (!l) return;
   const stages = Store.stageNames();
-  const next = new Date(Date.now() + 3 * 86400000).toISOString().slice(0, 10);
+  let choice = '';                                    // nothing picked yet
   openSheet(`
     <h3>Follow-up</h3>
-    <p class="sub">${esc(l.name)} · ${esc(Store.productName(l.product))} · ${esc(l.stage)}</p>
+    <p class="sub">${esc(l.name)} · ${esc(Store.productName(l.product))} · ${esc(l.stage)}${l.nextFollowupDate ? ' · was due ' + esc(prettyDate(l.nextFollowupDate)) : ''}</p>
     <div class="field"><label>What happened?</label>
       <textarea id="fuNote" rows="3" placeholder="e.g. Collected salary slips; sale deed copy still pending."></textarea></div>
-    <div class="row2">
-      <div class="field"><label>Move stage to</label>${sel('fuStage', stages, l.stage)}</div>
-      <div class="field"><label>Next follow-up</label>
-        <input id="fuDate" type="date" value="${esc(l.nextFollowupDate || next)}"></div>
+    <div class="field"><label>Move stage to</label>${sel('fuStage', stages, l.stage)}</div>
+    <div class="field" id="fuNextWrap"><label>Next follow-up</label>
+      <div class="nextchips">${NEXT_CHOICES.map(([k, t]) => `<button class="chip" data-next="${k}">${t}</button>`).join('')}</div>
+      <input id="fuDate" type="date" class="hidden" style="margin-top:8px" min="${todayStr()}">
+      <div class="hint" id="fuNextHint">Pick when to follow up next.</div>
     </div>
     <button class="btn" id="fuSave">Save follow-up</button>
   `);
+  const closedStage = () => { const d = Store.stageDef($('#fuStage').value); return d && (d.phase === 'done' || d.phase === 'lost'); };
+  const chosenDate = () => choice === 'none' ? '' : choice === 'pick' ? $('#fuDate').value : choice ? addDays(Number(choice)) : null;
+  const refresh = () => {
+    const closed = closedStage();
+    $('#fuNextWrap').classList.toggle('hidden', closed);
+    $$('#sheetBody [data-next]').forEach(b => b.classList.toggle('on', b.dataset.next === choice));
+    $('#fuDate').classList.toggle('hidden', choice !== 'pick');
+    const d = chosenDate();
+    $('#fuNextHint').textContent = closed ? '' : choice === 'none' ? 'No next date: the lead will show under Chase › Needs next date.'
+      : d ? 'Next follow-up: ' + longDate(d) : choice === 'pick' ? 'Choose a date above.' : 'Pick when to follow up next.';
+  };
+  $('#sheetBody').onclick = ev => { const b = ev.target.closest('[data-next]'); if (b) { choice = b.dataset.next; refresh(); } };
+  $('#fuStage').onchange = refresh;
+  $('#fuDate').oninput = refresh;
+  refresh();
+
   $('#fuSave').onclick = () => {
     const note = $('#fuNote').value.trim();
     if (!note) { toast('Add a short note', 'err'); return; }
-    Store.addFollowup({ leadId: l.id, note, stageFrom: l.stage, stageTo: $('#fuStage').value, nextDate: $('#fuDate').value });
+    let nextDate = '';
+    if (!closedStage()) {
+      nextDate = chosenDate();
+      if (nextDate === null || (choice === 'pick' && !nextDate)) { toast('Pick the next follow-up date', 'err'); return; }
+      if (nextDate && nextDate <= todayStr() && !confirm('The next follow-up is ' + (nextDate === todayStr() ? 'today' : 'in the past') + '. Save it like that?')) return;
+    }
+    Store.addFollowup({ leadId: l.id, note, stageFrom: l.stage, stageTo: $('#fuStage').value, nextDate });
     closeSheet(); toast('Follow-up saved', 'ok'); render();
   };
 }
@@ -879,7 +912,7 @@ function openFollowupForm(id) {
    ============================================================ */
 let chaseTab = 'due';
 function renderChase() {
-  const tabs = [['due', 'Due & overdue'], ['stuck', 'Stuck files'], ['team', 'With branch'], ['ro', 'At RO'], ['sanc', 'To disburse'], ['week', 'Next 7 days'], ['done', 'Recent activity']];
+  const tabs = [['due', 'Due & overdue'], ['nodate', 'Needs next date'], ['stuck', 'Stuck files'], ['team', 'With branch'], ['ro', 'At RO'], ['sanc', 'To disburse'], ['week', 'Next 7 days'], ['done', 'Recent activity']];
   $('#chaseChips').innerHTML = `<button class="chip" data-go="calendar">${ICON.cal} Calendar</button>` +
     tabs.map(([k, t]) => `<button class="chip${chaseTab === k ? ' on' : ''}" data-ctab="${k}">${t}</button>`).join('');
 
@@ -899,6 +932,7 @@ function renderChase() {
   } else {
     let list = scope.filter(l => !Store.isClosed(l));
     if (chaseTab === 'due') { list = list.filter(isDue); note = 'Follow-up date is today or has passed.'; }
+    if (chaseTab === 'nodate') { list = list.filter(needsNextDate).sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt))); note = 'Open leads with no next follow-up — includes tasks ticked off in Google Tasks.'; }
     if (chaseTab === 'stuck') { list = list.filter(isStuck).sort((a, b) => ageDays(b) - ageDays(a)); note = 'In the same stage for ' + CFG.STUCK_DAYS + '+ days (RO files excluded).'; }
     if (chaseTab === 'team') { list = byPhase(list, 'branch').sort((a, b) => ageDays(b) - ageDays(a)); note = 'Up to Application Generated — branch work.'; }
     if (chaseTab === 'ro') { list = byPhase(list, 'ro').sort((a, b) => ageDays(b) - ageDays(a)); note = 'At Regional Office — waiting, not chasing.'; }

@@ -230,7 +230,7 @@ function doPost(e) {
       case 'saveLead':     lock.waitLock(20000); var saved = saveLead_(user, req.lead);
                            return json_(afterLeadWrite_(saved, saved && saved.lead ? saved.lead.id : req.lead && req.lead.id));
       case 'deleteLead':   lock.waitLock(20000); return json_(afterLeadWrite_(deleteLead_(user, req.id), req.id));
-      case 'addFollowup':  lock.waitLock(20000); return json_(afterLeadWrite_(addFollowup_(user, req.followup), req.followup && req.followup.leadId));
+      case 'addFollowup':  lock.waitLock(20000); return json_(afterLeadWrite_(addFollowup_(user, req.followup), req.followup && req.followup.leadId, req.followup && req.followup.note));
       case 'saveDealer':   lock.waitLock(20000); return json_(saveDealer_(user, req.dealer));
       case 'deleteDealer': lock.waitLock(20000); return json_(deleteDealer_(user, req.id));
       case 'saveSettings': lock.waitLock(20000); return json_(saveSettings_(user, req.settings));
@@ -754,21 +754,109 @@ function taskList_() {
 
 // After a lead is saved, followed up or deleted, bring its task up to date.
 // Tasks trouble must never fail the save itself.
-function afterLeadWrite_(result, leadId) {
+// doneNote: set when a follow-up was logged — the lead's open task is ticked off (with the
+// note added) and kept as history, and the new next date gets a fresh task.
+function afterLeadWrite_(result, leadId, doneNote) {
   if (!result || result.ok === false || !leadId || !calOn_()) return result;
-  try { syncTasks_(String(leadId)); }
+  if (result.duplicate) return result;               // a resent follow-up: already handled
+  try {
+    if (doneNote) completeTask_(String(leadId), doneNote);
+    syncTasks_(String(leadId));
+  }
   catch (err) { log_('system', 'tasks-error', 'lead', leadId, String(err && err.message || err)); }
   return result;
 }
 
 // Trigger entry point (every 15 minutes) and manual re-sync.
+function completeTask_(leadId, note) {
+  var key = 'task:' + leadId, raw = props_().getProperty(key);
+  if (!raw) return;
+  var cur = JSON.parse(raw), listId = taskList_();
+  if (cur.s !== 'closed') {
+    try {
+      var t = Tasks.Tasks.get(listId, cur.t);
+      if (t.status !== 'completed') {
+        Tasks.Tasks.patch({ status: 'completed', notes: String(t.notes || '') + '\nDone ' + todayStr_() + ': ' + String(note).slice(0, 300) }, listId, cur.t);
+      }
+    } catch (e) { /* task deleted by hand: nothing to tick */ }
+  }
+  props_().deleteProperty(key);                      // the next sync makes a fresh task for the new date
+}
+
+// Google Tasks -> app. For tasks changed since the last run:
+//  - ticked off in Google Tasks  -> follow-up logged on the lead ("Done, ticked in Google Tasks"),
+//    its next date cleared (it then shows under Chase > Needs next date); the ticked task stays
+//  - due date moved in Google Tasks -> the lead's next follow-up date follows it
+// Only tasks this app is tracking are read, and closed or deleted leads are left alone.
+function pullFromTasks_() {
+  var store = props_(), all = store.getProperties();
+  var byTask = {};
+  Object.keys(all).forEach(function (k) {
+    if (k.indexOf('task:') !== 0) return;
+    var m = JSON.parse(all[k]);
+    if (m.s !== 'closed') byTask[m.t] = k.slice(5);
+  });
+  if (!Object.keys(byTask).length) return { done: 0, moved: 0 };
+
+  var listId = taskList_();
+  var since = all.CAL_LAST ? new Date(new Date(all.CAL_LAST).getTime() - 10 * 60000).toISOString() : null;
+  var changed = [], token;
+  do {
+    var q = { maxResults: 100, showCompleted: true, showHidden: true, pageToken: token };
+    if (since) q.updatedMin = since;
+    var page = Tasks.Tasks.list(listId, q);
+    (page.items || []).forEach(function (t) { if (byTask[t.id]) changed.push(t); });
+    token = page.nextPageToken;
+  } while (token);
+  if (!changed.length) return { done: 0, moved: 0 };
+
+  var closed = {};
+  (readSettings_().stages || []).forEach(function (st) { if (st.phase === 'done' || st.phase === 'lost') closed[st.name] = true; });
+  var sh = ss_().getSheetByName(TABS.LEADS), rows = readTab_(TABS.LEADS, LEAD_COLS), at = {};
+  rows.forEach(function (l, i) { if (l.id) at[String(l.id)] = i; });
+  var col = function (c) { return LEAD_COLS.indexOf(c) + 1; };
+  var fu = ss_().getSheetByName(TABS.FOLLOWUPS), now = new Date().toISOString();
+  var done = 0, moved = 0;
+
+  changed.forEach(function (t) {
+    var leadId = byTask[t.id], i = at[leadId];
+    if (i == null) return;
+    var l = rows[i];
+    if (String(l.deleted).toUpperCase() === 'TRUE' || closed[String(l.stage)]) return;
+    var r = i + 2, leadDate = toDateStr_(l.nextFollowupDate);
+    if (t.status === 'completed') {
+      fu.appendRow(['F' + Date.now() + Math.floor(Math.random() * 1000), leadId, now, 'Google Tasks',
+                    'Done (ticked in Google Tasks)', l.stage, l.stage, '']);
+      sh.getRange(r, col('nextFollowupDate')).setValue('');
+      sh.getRange(r, col('updatedAt')).setValue(now);
+      store.deleteProperty('task:' + leadId);        // keep the ticked task; no new one until a date is set
+      log_('Google Tasks', 'followup', 'lead', leadId, 'ticked off in Google Tasks');
+      done++;
+    } else if (t.due) {
+      var due = String(t.due).slice(0, 10);
+      if (due !== leadDate) {
+        sh.getRange(r, col('nextFollowupDate')).setValue(due);
+        sh.getRange(r, col('updatedAt')).setValue(now);
+        fu.appendRow(['F' + Date.now() + Math.floor(Math.random() * 1000), leadId, now, 'Google Tasks',
+                      'Next follow-up moved in Google Tasks', l.stage, l.stage, due]);
+        log_('Google Tasks', 'update', 'lead', leadId, 'next follow-up moved to ' + due);
+        moved++;
+      }
+    }
+  });
+  return { done: done, moved: moved };
+}
+
 function syncTasks() {
   if (!calOn_()) return { changes: 0, events: 0, pending: 0 };
   var lock = LockService.getScriptLock();
   lock.waitLock(30000);
   try {
+    var started = new Date().toISOString();
+    var back = pullFromTasks_();                     // read ticks and date moves first
     var r = syncTasks_(null);
-    props_().setProperties({ CAL_LAST: new Date().toISOString(), CAL_LAST_RESULT: r.events + ' follow-ups, ' + r.changes + ' written, ' + r.pending + ' pending' });
+    r.ticked = back.done; r.moved = back.moved;
+    props_().setProperties({ CAL_LAST: started, CAL_LAST_RESULT: r.events + ' follow-ups, ' + r.changes + ' written, ' + r.pending + ' pending; from Google Tasks: ' + back.done + ' ticked, ' + back.moved + ' moved' });
     return r;
   } catch (err) {
     props_().setProperties({ CAL_LAST: new Date().toISOString(), CAL_LAST_RESULT: 'error: ' + String(err && err.message || err).slice(0, 200) });
@@ -785,7 +873,7 @@ function tasksByLead_(listId) {
     var page = Tasks.Tasks.list(listId, { maxResults: 100, showCompleted: true, showHidden: true, pageToken: token });
     (page.items || []).forEach(function (t) {
       var m = /Lead ID: (\S+)/.exec(String(t.notes || ''));
-      if (m && !out[m[1]]) out[m[1]] = t.id;
+      if (m && !out[m[1]] && t.status !== 'completed') out[m[1]] = t.id;
     });
     token = page.nextPageToken;
   } while (token);

@@ -511,3 +511,5 @@ details.acc .acc-body{padding:0 16px 16px}
 }
 .chip svg{width:14px;height:14px;vertical-align:-2px;margin-right:2px}
 .cal-note svg{width:14px;height:14px;vertical-align:-2px;margin-right:4px;color:var(--brand-2)}
+.nextchips{display:flex;flex-wrap:wrap;gap:8px}
+.nextchips .chip{margin:0}
