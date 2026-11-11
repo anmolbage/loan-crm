@@ -855,15 +855,15 @@ $('#formSave').addEventListener('click', () => {
 /* ============================================================
    FOLLOW-UP FORM
    ============================================================ */
-// The next date must be chosen on purpose: the old date is never pre-filled, because
-// saving it unchanged left the follow-up (and its Google Task) stuck on a past day.
+// The old date is never pre-filled (saving it unchanged left the follow-up and its Google
+// Task stuck on a past day). If nothing else is picked, the next follow-up is tomorrow.
 const addDays = n => { const d = new Date(todayStr() + 'T00:00:00'); d.setDate(d.getDate() + n); return ymd(d); };
 const NEXT_CHOICES = [['1', 'Tomorrow'], ['3', '3 days'], ['7', '1 week'], ['14', '2 weeks'], ['30', '1 month'], ['pick', 'Pick date'], ['none', 'No next follow-up']];
 
 function openFollowupForm(id) {
   const l = Store.leads.find(x => x.id === id); if (!l) return;
   const stages = Store.stageNames();
-  let choice = '';                                    // nothing picked yet
+  let choice = '1';                                   // default: tomorrow
   openSheet(`
     <h3>Follow-up</h3>
     <p class="sub">${esc(l.name)} · ${esc(Store.productName(l.product))} · ${esc(l.stage)}${l.nextFollowupDate ? ' · was due ' + esc(prettyDate(l.nextFollowupDate)) : ''}</p>
@@ -899,7 +899,7 @@ function openFollowupForm(id) {
     let nextDate = '';
     if (!closedStage()) {
       nextDate = chosenDate();
-      if (nextDate === null || (choice === 'pick' && !nextDate)) { toast('Pick the next follow-up date', 'err'); return; }
+      if (choice === 'pick' && !nextDate) { toast('Choose a date, or tap another option', 'err'); return; }
       if (nextDate && nextDate <= todayStr() && !confirm('The next follow-up is ' + (nextDate === todayStr() ? 'today' : 'in the past') + '. Save it like that?')) return;
     }
     Store.addFollowup({ leadId: l.id, note, stageFrom: l.stage, stageTo: $('#fuStage').value, nextDate });
